@@ -27,6 +27,21 @@ class SolveRequest(BaseModel):
 def health():
     return {"ok": True}
 
+def _int_key_dict(dct):
+    if dct is None:
+        return None
+    out = {}
+    for k, v in dct.items():
+        out[int(k)] = float(v)
+    return out
+
+def _deposits_list(x):
+    # Lovable skickar [[age, amount], ...]
+    if x is None:
+        return None
+    return [(int(a), float(b)) for a, b in x]
+
+
 
 @app.post("/solve")
 def solve(req: SolveRequest):
@@ -48,12 +63,12 @@ def solve(req: SolveRequest):
         H_max=d.get("H_max"),
 
         max_years_with_company=d.get("max_years_with_company", 0),
-        company_B0_remaining=d.get("company_B0_remaining"),
-        company_initial_deposits=d.get("company_initial_deposits"),
+        company_B0_remaining=_int_key_dict(d.get("company_B0_remaining")),
+        company_initial_deposits=_deposits_list(d.get("company_initial_deposits")),
 
         deposit_frac_max=d.get("deposit_frac_max", 0.60),
         max_years_on_account=d.get("max_years_on_account", 10),
-        B0_remaining=d.get("B0_remaining"),
+        B0_remaining=_int_key_dict(d.get("B0_remaining")),
 
         R0=d.get("R0", 0.0),
         rho=d.get("rho", 0.0),
@@ -79,5 +94,6 @@ def solve(req: SolveRequest):
         "objective_npv": obj,
         "plan": plan,
     }
+
 
 

@@ -47,6 +47,8 @@ def _deposits_list(x):
 def solve(req: SolveRequest):
     d = req.data
 
+    objective_discount_terminal = False
+
     import json
     print("INCOMING DATA:", json.dumps(d, ensure_ascii=False))
 
@@ -94,6 +96,7 @@ def solve(req: SolveRequest):
         "objective_npv": obj,
         "plan": plan,
     }
+
 
 
 

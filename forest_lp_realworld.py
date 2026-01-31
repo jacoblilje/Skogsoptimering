@@ -35,7 +35,10 @@ class ForestPlanData:
     H_total: float
     H_max: Optional[List[float]] = None  # per-year cap för avverkningsvärde
 
-    # --- NEW: Skogsbolags-konto (utbetalningsplan) ---
+   
+    # NEW: Tillåt att Ypos överskrider R (dvs E > 0)
+    allow_exceed_utr: bool = True
+
     # max_years_with_company = 0 => ingen viloperiod (P[t]=H[t])
     max_years_with_company: int = 0
 
@@ -347,6 +350,10 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         prob += (P[t] - D[t]) + W[t] - C_tot[t] == Ypos[t] - Yneg[t], f"YSplit_{t}"
         prob += L[t] + E[t] == Ypos[t], f"LESum_{t}"
         prob += L[t] <= R[t], f"LowTaxCap_{t}"
+                # NEW: Om överskridning inte är tillåten => E[t] måste vara 0
+        if not data.allow_exceed_utr:
+            prob += E[t] == 0, f"NoExceedUtrymme_{t}"
+
         if tax.cap_income is not None:
             prob += Ypos[t] <= tax.cap_income, f"YposCap_{t}"
 
@@ -469,3 +476,4 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         })
 
     return status_str, obj_val, plan
+

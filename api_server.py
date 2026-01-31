@@ -1,3 +1,4 @@
+from tax_curve import get_kommun_rates, SwedishTaxInputs, build_tax_schedule
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -47,17 +48,26 @@ def _deposits_list(x):
 def solve(req: SolveRequest):
     d = req.data
 
-    objective_discount_terminal = False
-
     import json
     print("INCOMING DATA:", json.dumps(d, ensure_ascii=False))
 
+    # 1) Ignorera frontend-flaggor som inte stöds
+    d.pop("objective_discount_terminal", None)
 
     pools = [CostPool(**p) for p in d.get("flexible_cost_pools", [])]
     props = [ProportionalCost(**p) for p in d.get("proportional_costs", [])]
 
-    tax_d = d.get("tax")
-    tax = TaxSchedule(**tax_d) if tax_d else None
+    # 2) Bygg tax på backend (samma som i main.py)
+    kommun_rates = get_kommun_rates(xlsx_path=None)
+    tax_inp = SwedishTaxInputs(
+        kommun=d.get("kommun", "Uppsala"),
+        aktiv_naringsverksamhet=d.get("aktiv_naringsverksamhet", True),
+        include_state_tax=d.get("include_state_tax", True),
+        threshold_shift=d.get("threshold_shift", 50_000),
+        max_income=d.get("max_income", 3_000_000),
+        extra_marginal=d.get("extra_marginal", 0.00),
+    )
+    tax = build_tax_schedule(kommun_rates, tax_inp)
 
     data = ForestPlanData(
         N=d["N"],
@@ -93,9 +103,13 @@ def solve(req: SolveRequest):
 
     return {
         "status": status,
-        "objective_npv": obj,
+        "objective_npv": float(obj),
+        "objective": float(obj),   # alias så Lovable inte visar "-"
         "plan": plan,
+        "tax_used": {"brackets": tax.brackets, "base_tax": tax.base_tax, "cap_income": tax.cap_income},
     }
+
+
 
 
 

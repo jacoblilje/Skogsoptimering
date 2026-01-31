@@ -78,6 +78,9 @@ def solve(req: SolveRequest):
         company_B0_remaining=_int_key_dict(d.get("company_B0_remaining")),
         company_initial_deposits=_deposits_list(d.get("company_initial_deposits")),
 
+        allow_exceed_utr=bool(d.get("allow_exceed_utr", True)),
+
+
         deposit_frac_max=d.get("deposit_frac_max", 0.60),
         max_years_on_account=d.get("max_years_on_account", 10),
         B0_remaining=_int_key_dict(d.get("B0_remaining")),
@@ -104,10 +107,12 @@ def solve(req: SolveRequest):
     return {
         "status": status,
         "objective_npv": float(obj),
-        "objective": float(obj),   # alias så Lovable inte visar "-"
+        "objective": float(obj), 
+        "allow_exceed_utr_used": data.allow_exceed_utr,# alias så Lovable inte visar "-"
         "plan": plan,
         "tax_used": {"brackets": tax.brackets, "base_tax": tax.base_tax, "cap_income": tax.cap_income},
     }
+
 
 
 

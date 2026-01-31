@@ -32,6 +32,10 @@ def health():
 def solve(req: SolveRequest):
     d = req.data
 
+    import json
+    print("INCOMING DATA:", json.dumps(d, ensure_ascii=False))
+
+
     pools = [CostPool(**p) for p in d.get("flexible_cost_pools", [])]
     props = [ProportionalCost(**p) for p in d.get("proportional_costs", [])]
 
@@ -75,4 +79,5 @@ def solve(req: SolveRequest):
         "objective_npv": obj,
         "plan": plan,
     }
+
 

@@ -61,6 +61,8 @@ def main():
         rho=0.07,
         use_Bavg=True,
 
+        allow_exceed_utr=True,  # NEW: stänger av E>0
+
         # Kostnader
         fixed_costs=[10_000] * N,
         flexible_cost_pools=[
@@ -112,3 +114,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

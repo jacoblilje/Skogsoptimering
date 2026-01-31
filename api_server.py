@@ -1,11 +1,22 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from forest_lp_realworld import ForestPlanData, CostPool, ProportionalCost, solve_forest_lp
 from tax_curve import TaxSchedule
 
 app = FastAPI(title="Skog Optimering API", version="1.0")
+
+# --- CORS (viktig för Lovable/webb-klienter) ---
+# Börja gärna med "*" för att testa, lås sedan till din Lovable-domän.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],            # t.ex. ["https://din-app.lovable.app"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class SolveRequest(BaseModel):
@@ -64,3 +75,4 @@ def solve(req: SolveRequest):
         "objective_npv": obj,
         "plan": plan,
     }
+

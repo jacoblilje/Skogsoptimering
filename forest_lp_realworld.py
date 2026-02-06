@@ -51,7 +51,7 @@ class ForestPlanData:
     H_max: Optional[List[float]] = None
 
     # --------------------------
-    # NEW: Company holding step (skogbolag vilotid)
+    # Company holding step (skogbolag vilotid)
     # --------------------------
     use_company_holding: bool = True
     max_years_with_company: int = 0  # X years max holding at company
@@ -82,20 +82,15 @@ class ForestPlanData:
     allow_negative_cash: bool = False  # if False => cash[t] >= 0 for all t
 
     # --------------------------
-    # Räntefördelning (NEW)
+    # Positive räntefördelning via kapitalunderlag (ALLTID)
     # --------------------------
-    use_capital_base_rf: bool = True
-    rf_rate: float = 0.08  # user-selectable (e.g. 8%)
+    rf_rate: float = 0.08  # user-selectable
     # "Capital base fixed" = anskaffningsvärde + maskiner/övrigt (constant base)
     capital_base_fixed: float = 0.0
     # Should skogskonto balance contribute to capital base?
     include_skogskonto_in_capital_base: bool = True
-    # Use average skogskonto balance when computing capital base
+    # Use average skogskonto balance (Bavg) or end balance (B_end_total) in capital base
     use_Bavg: bool = True
-
-    # Legacy proxy (kept for backward compatibility, not used if use_capital_base_rf=True)
-    R0: float = 0.0
-    rho: float = 0.0
 
     # --------------------------
     # Taxes
@@ -109,7 +104,7 @@ class ForestPlanData:
     discount_rate: float = 0.0
 
     # --------------------------
-    # NEW: Allow/forbid exceeding R (E>0)
+    # Allow/forbid exceeding R (E>0)
     # --------------------------
     allow_exceed_utr: bool = True
 
@@ -124,15 +119,17 @@ def discount_factor(t: int, r: float) -> float:
 
 def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None):
     """
-    Solves LP:
+    LP model:
       - H[t]: harvest created value (must sum to H_total)
-      - P[t]: payout from company to business (equals H[t] if company holding disabled)
-      - Company holding buckets (optional): can delay payouts up to X years
-      - Skogskonto buckets: deposit D[t] <= 60% of payout P[t], withdrawals W[t] with 10-year rule
+      - Company holding (optional): can delay payouts up to X years
+      - P[t]: payout received by business (equals H[t] if company holding disabled)
+      - Skogskonto: D[t] <= 60% of P[t], withdrawals W[t] with 10-year rule
       - Taxable income: Y = (P-D) + W - Costs
-      - Split Ypos (positive part) into L (<=R) + E (exceed)
-      - If allow_exceed_utr=False => E[t]=0 constraint
-      - R computed from capital base: R[t] = rf_rate * (capital_base_fixed + skogskonto_balance_proxy)
+      - Split Ypos into L (<=R) + E (exceed)
+      - If allow_exceed_utr=False => E[t]=0
+      - R ALWAYS computed from capital base:
+          CapBase[t] = capital_base_fixed + skogskonto_component
+          R[t] = rf_rate * CapBase[t]
       - Objective: maximize NPV of NetAfterTax (annual discounted)
       - Cash: Cash[t] evolves with NetAfterTax; optionally nonnegative.
     """
@@ -140,11 +137,9 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
     N = int(data.N)
     T = range(1, N + 1)
 
-    # --- Harvest caps ---
     if data.H_max is not None and len(data.H_max) != N:
         raise ValueError("H_max must be length N or None")
 
-    # --- Fixed costs length ---
     if data.fixed_costs is not None and len(data.fixed_costs) != N:
         raise ValueError("fixed_costs must be length N or None")
 
@@ -167,6 +162,7 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
                 kk = int(k)
                 if 1 <= kk <= X:
                     company_B0[kk] += float(v)
+
         if data.company_initial_deposits:
             # deposits are (age_years, amount)
             for age, amt in data.company_initial_deposits:
@@ -174,7 +170,6 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
                 amt = float(amt)
                 rem = X - age
                 if rem < 1:
-                    # already due this year
                     rem = 1
                 if rem > X:
                     rem = X
@@ -200,7 +195,6 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
 
     # Company holding (optional)
     if use_company:
-        # withdrawals from company buckets
         CU = pulp.LpVariable.dicts("CU", [(t, k) for t in T for k in comp_buckets], lowBound=0)
         C_end = pulp.LpVariable.dicts("C_end", [(t, k) for t in T for k in comp_buckets], lowBound=0)
     else:
@@ -260,21 +254,17 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
 
     # Company holding logic
     if not use_company:
-        # No holding step: payout equals harvest each year
         for t in T:
             prob += P[t] == H[t], f"PayoutEqualsHarvest_{t}"
     else:
-        # Payout equals sum of company withdrawals
         for t in T:
             prob += P[t] == pulp.lpSum(CU[(t, k)] for k in comp_buckets), f"CompanyPayoutSum_{t}"
 
-        # Withdraw feasibility + forced withdrawal of bucket 1 (deadline)
         for t in T:
             for k in comp_buckets:
                 prob += CU[(t, k)] <= comp_avail_start(t, k), f"CompanyWithdrawCap_t{t}_k{k}"
             prob += CU[(t, 1)] == comp_avail_start(t, 1), f"CompanyForcedWithdraw_{t}"
 
-        # Bucket dynamics: new harvest enters bucket X, and balances shift down
         for t in T:
             prob += C_end[(t, X)] == H[t], f"CompanyDeposit_{t}"
             for k in range(1, X):
@@ -311,22 +301,17 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
 
     # Costs
     for t in T:
-        # Fixed costs: if list given, fix them. Else free variable can go to 0.
         if data.fixed_costs is not None:
             prob += C_fixed[t] == float(data.fixed_costs[t - 1]), f"FixedCost_{t}"
         else:
             prob += C_fixed[t] == 0.0, f"FixedCostZero_{t}"
 
-    # Flexible pools allocation constraints
     for i, pool in enumerate(data.flexible_cost_pools):
-        # Sum of allocations equals pool.amount
         prob += pulp.lpSum(C_flex[(t, i)] for t in T) == float(pool.amount), f"FlexPoolSum_{i}"
-        # Outside window => 0
         for t in T:
             if t < pool.start_year or t > pool.end_year:
                 prob += C_flex[(t, i)] == 0.0, f"FlexPoolWindow_i{i}_t{t}"
 
-    # Proportional costs
     for i, pc in enumerate(data.proportional_costs):
         for t in T:
             src = t - int(pc.lag)
@@ -335,47 +320,35 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
             else:
                 prob += C_prop[(t, i)] == 0.0, f"PropCostZero_i{i}_t{t}"
 
-    # Total cost per year
     def total_cost_expr(t: int):
         flex_sum = pulp.lpSum(C_flex[(t, i)] for i in range(len(data.flexible_cost_pools))) if data.flexible_cost_pools else 0
         prop_sum = pulp.lpSum(C_prop[(t, i)] for i in range(len(data.proportional_costs))) if data.proportional_costs else 0
         return C_fixed[t] + flex_sum + prop_sum
 
-    # Capital base and R (new logic)
-    if data.use_capital_base_rf:
-        for t in T:
-            sk_part = Bavg[t] if data.include_skogskonto_in_capital_base else 0.0
-            prob += CapBase[t] == float(data.capital_base_fixed) + sk_part, f"CapBaseDef_{t}"
-            prob += R[t] == float(data.rf_rate) * CapBase[t], f"RDef_{t}"
-    else:
-        # Legacy proxy dynamics: R[1]=R0 and R[t+1]=R[t]-L[t]+rho*Bavg[t]
-        prob += R[1] == float(data.R0), "R_Init"
-        for t in range(1, N):
-            prob += R[t + 1] == R[t] - L[t] + float(data.rho) * (Bavg[t] if data.use_Bavg else pulp.lpSum(B_end[(t, k)] for k in sk_buckets)), f"R_Dyn_{t}"
-        # Define CapBase for reporting only (optional)
-        for t in T:
-            sk_part = Bavg[t] if data.include_skogskonto_in_capital_base else 0.0
-            prob += CapBase[t] == float(data.capital_base_fixed) + sk_part, f"CapBaseLegacy_{t}"
+    # Capital base and R (ALWAYS from capital base)
+    for t in T:
+        B_end_total_t = pulp.lpSum(B_end[(t, k)] for k in sk_buckets)
+        sk_part = 0.0
+        if data.include_skogskonto_in_capital_base:
+            sk_part = Bavg[t] if data.use_Bavg else B_end_total_t
+        prob += CapBase[t] == float(data.capital_base_fixed) + sk_part, f"CapBaseDef_{t}"
+        prob += R[t] == float(data.rf_rate) * CapBase[t], f"RDef_{t}"
 
     # Taxable income: Y = (P - D) + W - Costs
     for t in T:
         Y_expr = (P[t] - D[t]) + W[t] - total_cost_expr(t)
         prob += Y_expr == Ypos[t] - Yneg[t], f"YSplit_{t}"
 
-        # Decompose positive income
         prob += L[t] + E[t] == Ypos[t], f"LESum_{t}"
         prob += L[t] <= R[t], f"LowTaxCap_{t}"
 
-        # NEW: disallow exceed if user turns it off
         if not data.allow_exceed_utr:
             prob += E[t] == 0.0, f"NoExceedUtr_{t}"
 
     # Piecewise tax for E
-    # E[t] = sum Seg[t,j], Seg bounds by bracket sizes
-    # TaxE[t] = base_tax + sum rate_j * Seg[t,j]
     bounds = []
     prev = 0.0
-    for upper, rate in tax.brackets:
+    for upper, _rate in tax.brackets:
         upper = float(upper)
         bounds.append(max(0.0, upper - prev))
         prev = upper
@@ -384,7 +357,10 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         prob += E[t] == pulp.lpSum(Seg[(t, j)] for j in range(len(tax.brackets))), f"ESegSum_{t}"
         for j in range(len(tax.brackets)):
             prob += Seg[(t, j)] <= bounds[j], f"SegBound_t{t}_j{j}"
-        prob += TaxE[t] == float(tax.base_tax) + pulp.lpSum(float(tax.brackets[j][1]) * Seg[(t, j)] for j in range(len(tax.brackets))), f"TaxEDef_{t}"
+
+        prob += TaxE[t] == float(tax.base_tax) + pulp.lpSum(
+            float(tax.brackets[j][1]) * Seg[(t, j)] for j in range(len(tax.brackets))
+        ), f"TaxEDef_{t}"
 
         prob += TaxL[t] == float(data.tau_capital) * L[t], f"TaxLDef_{t}"
         prob += TaxPaid[t] == TaxL[t] + TaxE[t], f"TaxPaidDef_{t}"
@@ -402,12 +378,11 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         if not data.allow_negative_cash:
             prob += Cash[t] >= 0.0, f"CashNonNeg_{t}"
 
-    # NPV contributions
+    # NPV contributions & Objective
     for t in T:
         disc = discount_factor(t, float(data.discount_rate))
         prob += NPV_contrib[t] == disc * NetAfterTax[t], f"NPVContribDef_{t}"
 
-    # Objective: maximize sum of discounted annual net after tax
     prob += pulp.lpSum(NPV_contrib[t] for t in T), "Obj_NPV_AnnualNet"
 
     # Solve
@@ -420,14 +395,12 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
     # Collect plan
     plan: List[Dict] = []
     for t in T:
-        # skogskonto totals
         B_end_total = sum(pulp.value(B_end[(t, k)]) or 0.0 for k in sk_buckets)
         if t == 1:
             B_start_total = sum(B0[k] for k in sk_buckets)
         else:
             B_start_total = sum(pulp.value(B_end[(t - 1, k)]) or 0.0 for k in sk_buckets)
 
-        # company totals
         if use_company:
             C_end_total = sum(pulp.value(C_end[(t, k)]) or 0.0 for k in comp_buckets)
             if t == 1:
@@ -438,7 +411,6 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
             C_start_total = 0.0
             C_end_total = 0.0
 
-        # total cost numeric
         C_tot_val = pulp.value(total_cost_expr(t)) or 0.0
 
         plan.append({

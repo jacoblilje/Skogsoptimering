@@ -1,117 +1,70 @@
 # main.py
 from forest_lp_realworld import (
-    ForestPlanData, CostPool, ProportionalCost, solve_forest_lp
+    ForestPlanData, CostPool, ProportionalCost, TaxSchedule, solve_forest_lp
 )
-from tax_curve import get_kommun_rates, SwedishTaxInputs, build_tax_schedule
-from explain import explain_plan, format_explanations
-from report_pdf import export_pdf_report
-
 
 def main():
-    # --- Tax schedule inputs (kan vara grovt proxy, men stabilt) ---
-    kommun_rates = get_kommun_rates(xlsx_path=None)  # fallback om ingen Excel
-
-    tax_inp = SwedishTaxInputs(
-        kommun="Uppsala",
-        aktiv_naringsverksamhet=True,
-        include_state_tax=True,
-        threshold_shift=50_000,
-        max_income=3_000_000,
-        extra_marginal=0.00,
-    )
-    tax_schedule = build_tax_schedule(kommun_rates, tax_inp)
-
-    # --- Horizon ---
     N = 15
-
-    # --- NEW: holding at company (X år) and initial deposits there ---
-    # max_years_with_company = X
-    # company_initial_deposits: [(age_years, amount), ...]
-    # age_years = hur många år sedan beloppet "sattes in" (uppstod och blev vilande)
-    X = 5
 
     data = ForestPlanData(
         N=N,
 
-        # Avverkningsvärde som "uppstår" hos skogsbolaget
+        # Avverkning
         H_total=2_000_000,
-        H_max=[450_000] * N,
+        H_max=[450_000]*N,
 
-        # NEW: utbetalningsplan
-        max_years_with_company=X,
-        company_initial_deposits=[
-            (1, 200_000),  # sattes in för 1 år sedan -> 3 år kvar om X=4
-            (3, 100_000),  # sattes in för 3 år sedan -> 1 år kvar -> tvingas ut år 1
-        ],
-        # (valfritt) avancerat bucket-format: company_B0_remaining={1:...,2:...} kan kombineras
+        # NEW: Skogsbolagsvila toggle
+        use_company_holding=False,   # <-- TEST: stäng av vilotiden
+        max_years_with_company=5,
+        company_initial_deposits=[(1, 200_000), (3, 100_000)],
 
         # Skogskonto initialt
-        B0_remaining={
-            1: 50_000,
-            2: 120_000,
-            3: 428000,
-            6:800000,
-            
-        },
+        B0_remaining={1: 50_000, 2: 120_000, 3: 428_000, 6: 800_000},
         deposit_frac_max=0.60,
         max_years_on_account=10,
 
-        # R proxy
-        R0=650_000,
-        rho=0.07,
-        use_Bavg=True,
-
-        allow_exceed_utr=True,  # NEW: stänger av E>0
-
         # Kostnader
-        fixed_costs=[10_000] * N,
-        flexible_cost_pools=[
-            CostPool(name="Skogsvård", amount=60_000, start_year=2, end_year=6),
-        ],
-        proportional_costs=[
-            ProportionalCost(name="Återväxt", alpha=0.08, lag=1),
-        ],
+        fixed_costs=[10_000]*N,
+        flexible_cost_pools=[CostPool("Skogsvård", 60_000, 2, 6)],
+        proportional_costs=[ProportionalCost("Återväxt", alpha=0.08, lag=1)],
 
-        # Skatt och diskontering
-        tax=tax_schedule,
-        discount_rate=0.03,
-
-        # Likviditet
+        # Cash
         initial_cash=200_000,
         allow_negative_cash=False,
+
+        # NEW: Kapitalunderlag-baserad räntefördelning
+        use_capital_base_rf=True,
+        rf_rate=0.08,
+        capital_base_fixed=3_500_000,   # anskaffningsvärde + maskiner/övrigt
+        include_skogskonto_in_capital_base=True,
+        use_Bavg=True,
+
+        # Skatt
+        tau_capital=0.30,
+        tax=TaxSchedule(brackets=[(693_000, 0.6149), (3_000_000, 0.8149)], base_tax=0.0),
+
+        # NPV
+        discount_rate=0.03,
+
+        # NEW: Tillåt/inte överskrida utrymme
+        allow_exceed_utr=True,
     )
 
     status, obj, plan = solve_forest_lp(data)
-
     print("Status:", status)
-    print(f"Objective (NPV av årligt netto efter skatt): {obj:,.0f} kr")
-    print(f"Startkassa: {data.initial_cash:,.0f} kr")
-    if plan:
-        print(f"Slutkassa Cash[N]: {plan[-1]['Cash_end']:,.0f} kr")
+    print(f"Målfunktion (NPV av årligt netto efter skatt): {obj:,.0f} kr")
+    print("Slutkassa:", f"{plan[-1]['Cash_end']:,.0f} kr" if plan else "-")
 
-    print(f"Sum H (avverkning, skapad hos bolag): {sum(r['H'] for r in plan):,.0f} kr")
-    print(f"Sum P (utbetalning från bolag):       {sum(r['P'] for r in plan):,.0f} kr")
-    if data.max_years_with_company > 0:
-        print(f"Bolagssaldo slut: {plan[-1]['Company_end_total']:,.0f} kr")
-
-    # Förklaringsmotor
-    expl_lines = explain_plan(plan, data)
-    expl_text = format_explanations(expl_lines, max_lines=120)
-
-    # PDF
-    pdf_name = "skogsrappport.pdf"
-    export_pdf_report(
-        pdf_path=pdf_name,
-        status=status,
-        objective_value=obj,
-        plan=plan,
-        explanations_text=expl_text,
-        title="Skogsplan – rådgivningsrapport (NPV av årligt netto, med utbetalningsplan)",
-        keep_dashboard_png=False,
-    )
-    print(f"\nSkapade PDF: {pdf_name}")
-
+    # Visa några nyckelkolumner
+    print("\nÅr | H | P | D | W | Ypos | L | E | R | CapBase | Tax | Net | NPV_bidrag | Cash")
+    for r in plan:
+        print(
+            f"{r['year']:>2} | "
+            f"{r['H']:>7.0f} | {r['P']:>7.0f} | {r['D']:>7.0f} | {r['W']:>7.0f} | "
+            f"{r['Ypos']:>7.0f} | {r['L']:>7.0f} | {r['E']:>7.0f} | {r['R']:>7.0f} | "
+            f"{r['CapBase']:>8.0f} | {r['TaxPaid']:>7.0f} | {r['NetAfterTax']:>7.0f} | "
+            f"{r['NPV_contrib']:>9.0f} | {r['Cash_end']:>7.0f}"
+        )
 
 if __name__ == "__main__":
     main()
-

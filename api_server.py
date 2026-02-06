@@ -1,20 +1,20 @@
-from tax_curve import get_kommun_rates, SwedishTaxInputs, build_tax_schedule
+# api_server.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
-from forest_lp_realworld import ForestPlanData, CostPool, ProportionalCost, solve_forest_lp
-from tax_curve import TaxSchedule
+from forest_lp_realworld import (
+    ForestPlanData, CostPool, ProportionalCost, TaxSchedule, solve_forest_lp
+)
 
-app = FastAPI(title="Skog Optimering API", version="1.0")
+app = FastAPI(title="Skog Optimering API", version="2.0")
 
-# --- CORS (viktig för Lovable/webb-klienter) ---
-# Börja gärna med "*" för att testa, lås sedan till din Lovable-domän.
+# CORS (för Lovable)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],            # t.ex. ["https://din-app.lovable.app"]
-    allow_credentials=True,
+    allow_origins=["*"],  # lås till din Lovable-domän senare
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -28,6 +28,7 @@ class SolveRequest(BaseModel):
 def health():
     return {"ok": True}
 
+
 def _int_key_dict(dct):
     if dct is None:
         return None
@@ -36,86 +37,98 @@ def _int_key_dict(dct):
         out[int(k)] = float(v)
     return out
 
+
 def _deposits_list(x):
-    # Lovable skickar [[age, amount], ...]
     if x is None:
         return None
+    # Lovable skickar ofta [[age, amount], ...]
     return [(int(a), float(b)) for a, b in x]
-
 
 
 @app.post("/solve")
 def solve(req: SolveRequest):
-    d = req.data
-
     import json
+    d = req.data
     print("INCOMING DATA:", json.dumps(d, ensure_ascii=False))
 
-    # 1) Ignorera frontend-flaggor som inte stöds
+    # Tolerera om Lovable skickar extra flaggor som vi inte använder
     d.pop("objective_discount_terminal", None)
 
     pools = [CostPool(**p) for p in d.get("flexible_cost_pools", [])]
     props = [ProportionalCost(**p) for p in d.get("proportional_costs", [])]
 
-    # 2) Bygg tax på backend (samma som i main.py)
-    kommun_rates = get_kommun_rates(xlsx_path=None)
-    tax_inp = SwedishTaxInputs(
-        kommun=d.get("kommun", "Uppsala"),
-        aktiv_naringsverksamhet=d.get("aktiv_naringsverksamhet", True),
-        include_state_tax=d.get("include_state_tax", True),
-        threshold_shift=d.get("threshold_shift", 50_000),
-        max_income=d.get("max_income", 3_000_000),
-        extra_marginal=d.get("extra_marginal", 0.00),
-    )
-    tax = build_tax_schedule(kommun_rates, tax_inp)
+    tax_d = d.get("tax")
+    tax = TaxSchedule(**tax_d) if tax_d else None
 
     data = ForestPlanData(
-        N=d["N"],
-        H_total=d["H_total"],
+        N=int(d["N"]),
+        H_total=float(d["H_total"]),
         H_max=d.get("H_max"),
 
-        max_years_with_company=d.get("max_years_with_company", 0),
+        # NEW: company holding toggle
+        use_company_holding=bool(d.get("use_company_holding", True)),
+        max_years_with_company=int(d.get("max_years_with_company", 0)),
         company_B0_remaining=_int_key_dict(d.get("company_B0_remaining")),
         company_initial_deposits=_deposits_list(d.get("company_initial_deposits")),
 
-        allow_exceed_utr=bool(d.get("allow_exceed_utr", True)),
-
-
-        deposit_frac_max=d.get("deposit_frac_max", 0.60),
-        max_years_on_account=d.get("max_years_on_account", 10),
+        # Skogskonto
+        deposit_frac_max=float(d.get("deposit_frac_max", 0.60)),
+        max_years_on_account=int(d.get("max_years_on_account", 10)),
         B0_remaining=_int_key_dict(d.get("B0_remaining")),
 
-        R0=d.get("R0", 0.0),
-        rho=d.get("rho", 0.0),
-        use_Bavg=d.get("use_Bavg", True),
-
+        # Costs
         fixed_costs=d.get("fixed_costs"),
         flexible_cost_pools=pools,
         proportional_costs=props,
 
+        # Cash
+        initial_cash=float(d.get("initial_cash", 200_000.0)),
+        allow_negative_cash=bool(d.get("allow_negative_cash", False)),
+
+        # NEW: capital base räntefördelning
+        use_capital_base_rf=bool(d.get("use_capital_base_rf", True)),
+        rf_rate=float(d.get("rf_rate", 0.08)),
+        capital_base_fixed=float(d.get("capital_base_fixed", 0.0)),
+        include_skogskonto_in_capital_base=bool(d.get("include_skogskonto_in_capital_base", True)),
+        use_Bavg=bool(d.get("use_Bavg", True)),
+
+        # Legacy (still accepted)
+        R0=float(d.get("R0", 0.0)),
+        rho=float(d.get("rho", 0.0)),
+
+        # Taxes
+        tau_capital=float(d.get("tau_capital", 0.30)),
         tax=tax,
-        discount_rate=d.get("discount_rate", 0.0),
 
-        initial_cash=d.get("initial_cash", 200_000.0),
-        allow_negative_cash=d.get("allow_negative_cash", False),
+        # Discount
+        discount_rate=float(d.get("discount_rate", 0.0)),
 
-        tau_capital=d.get("tau_capital", 0.30),
+        # NEW: allow exceed
+        allow_exceed_utr=bool(d.get("allow_exceed_utr", True)),
     )
 
     status, obj, plan = solve_forest_lp(data)
 
+    print("SOLVE RESULT:", status, obj)
+    if plan:
+        print("CASH_END:", plan[-1].get("Cash_end"))
+
     return {
         "status": status,
         "objective_npv": float(obj),
-        "objective": float(obj), 
-        "allow_exceed_utr_used": data.allow_exceed_utr,# alias så Lovable inte visar "-"
+        "objective": float(obj),  # alias for Lovable KPI
+        "kpis": {
+            "objective_npv": float(obj),
+            "objective_label": "NPV av årligt netto efter skatt",
+            "cash_end": float(plan[-1]["Cash_end"]) if plan else None,
+        },
+        "policy_used": {
+            "use_company_holding": data.use_company_holding,
+            "allow_exceed_utr": data.allow_exceed_utr,
+            "use_capital_base_rf": data.use_capital_base_rf,
+            "rf_rate": data.rf_rate,
+            "capital_base_fixed": data.capital_base_fixed,
+            "include_skogskonto_in_capital_base": data.include_skogskonto_in_capital_base,
+        },
         "plan": plan,
-        "tax_used": {"brackets": tax.brackets, "base_tax": tax.base_tax, "cap_income": tax.cap_income},
     }
-
-
-
-
-
-
-

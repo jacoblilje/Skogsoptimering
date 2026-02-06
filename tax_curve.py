@@ -45,6 +45,7 @@ def get_kommun_rates(xlsx_path: Optional[str] = None) -> Dict[str, float]:
         "Stockholm": 0.290,
         "Göteborg": 0.320,
         "Malmö": 0.315,
+        "Västerås": 0.3124
     }
     if xlsx_path is None:
         return fallback
@@ -111,3 +112,4 @@ def build_tax_schedule(kommun_rates: Dict[str, float], inp: SwedishTaxInputs) ->
         (t3, r3),
     ]
     return TaxSchedule(brackets=brackets, base_tax=0.0, cap_income=inp.max_income)
+

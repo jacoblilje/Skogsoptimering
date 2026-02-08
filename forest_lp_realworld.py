@@ -82,14 +82,22 @@ class ForestPlanData:
     allow_negative_cash: bool = False  # if False => cash[t] >= 0 for all t
 
     # --------------------------
-    # Positive räntefördelning via kapitalunderlag (ALLTID)
+    # Kapitalunderlag (deklarationslikt)
     # --------------------------
-    rf_rate: float = 0.08  # user-selectable
-    # "Capital base fixed" = anskaffningsvärde + maskiner/övrigt (constant base)
-    capital_base_fixed: float = 0.0
-    # Should skogskonto balance contribute to capital base?
-    include_skogskonto_in_capital_base: bool = True
-    # Use average skogskonto balance (Bavg) or end balance (B_end_total) in capital base
+    # + Tillgångar - Skulder (B10)
+    b10_assets_minus_liabilities: float = 0.0
+    # + Kvarvarande sparat fördelningsbelopp
+    saved_allocation_amount: float = 0.0
+    # - Summa periodiseringsfonder
+    periodization_funds_sum: float = 0.0
+    # - 79.4% av expansionsfonden
+    expansion_fund_sum: float = 0.0
+    # + gamma * skogskonto (typiskt gamma=0.50)
+    skogskonto_capital_share: float = 0.50
+
+    # Räntefördelningsränta
+    rf_rate: float = 0.08
+    # Use average skogskonto balance (Bavg) or end balance in capital base
     use_Bavg: bool = True
 
     # --------------------------
@@ -113,6 +121,16 @@ def discount_factor(t: int, r: float) -> float:
     return 1.0 / ((1.0 + r) ** t)
 
 
+def _k_fast(data: ForestPlanData) -> float:
+    """Deklarationslik fast del av kapitalunderlaget."""
+    return (
+        float(data.b10_assets_minus_liabilities)
+        + float(data.saved_allocation_amount)
+        - float(data.periodization_funds_sum)
+        - 0.794 * float(data.expansion_fund_sum)
+    )
+
+
 # -----------------------------
 # Solver
 # -----------------------------
@@ -127,8 +145,9 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
       - Taxable income: Y = (P-D) + W - Costs
       - Split Ypos into L (<=R) + E (exceed)
       - If allow_exceed_utr=False => E[t]=0
-      - R ALWAYS computed from capital base:
-          CapBase[t] = capital_base_fixed + skogskonto_component
+      - Kapitalunderlag:
+          K_fast = B10 + sparat - periodiseringsfonder - 0.794*expansionsfond
+          CapBase[t] = K_fast + gamma * skogskonto_component
           R[t] = rf_rate * CapBase[t]
       - Objective: maximize NPV of NetAfterTax (annual discounted)
       - Cash: Cash[t] evolves with NetAfterTax; optionally nonnegative.
@@ -164,7 +183,6 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
                     company_B0[kk] += float(v)
 
         if data.company_initial_deposits:
-            # deposits are (age_years, amount)
             for age, amt in data.company_initial_deposits:
                 age = int(age)
                 amt = float(amt)
@@ -207,14 +225,14 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
     C_prop = pulp.LpVariable.dicts("C_prop", [(t, i) for t in T for i in range(len(data.proportional_costs))], lowBound=0)
 
     # Tax split
-    Ypos = pulp.LpVariable.dicts("Ypos", T, lowBound=0)  # max(Y,0)
-    Yneg = pulp.LpVariable.dicts("Yneg", T, lowBound=0)  # max(-Y,0)
+    Ypos = pulp.LpVariable.dicts("Ypos", T, lowBound=0)
+    Yneg = pulp.LpVariable.dicts("Yneg", T, lowBound=0)
     L = pulp.LpVariable.dicts("L", T, lowBound=0)
     E = pulp.LpVariable.dicts("E", T, lowBound=0)
 
     # Capital base and R
-    CapBase = pulp.LpVariable.dicts("CapBase", T, lowBound=0)
-    R = pulp.LpVariable.dicts("R", T, lowBound=0)
+    CapBase = pulp.LpVariable.dicts("CapBase", T, lowBound=None)  # can be negative if K_fast negative
+    R = pulp.LpVariable.dicts("R", T, lowBound=None)
 
     # Tax on E via piecewise segments
     Seg = pulp.LpVariable.dicts("Seg", [(t, j) for t in T for j in range(len(tax.brackets))], lowBound=0)
@@ -325,13 +343,15 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         prop_sum = pulp.lpSum(C_prop[(t, i)] for i in range(len(data.proportional_costs))) if data.proportional_costs else 0
         return C_fixed[t] + flex_sum + prop_sum
 
-    # Capital base and R (ALWAYS from capital base)
+    # Kapitalunderlag och R (deklarationslikt + gamma*skogskonto)
+    K_fast = _k_fast(data)
+    gamma = float(data.skogskonto_capital_share)
+
     for t in T:
         B_end_total_t = pulp.lpSum(B_end[(t, k)] for k in sk_buckets)
-        sk_part = 0.0
-        if data.include_skogskonto_in_capital_base:
-            sk_part = Bavg[t] if data.use_Bavg else B_end_total_t
-        prob += CapBase[t] == float(data.capital_base_fixed) + sk_part, f"CapBaseDef_{t}"
+        sk_component = Bavg[t] if data.use_Bavg else B_end_total_t
+
+        prob += CapBase[t] == K_fast + gamma * sk_component, f"CapBaseDef_{t}"
         prob += R[t] == float(data.rf_rate) * CapBase[t], f"RDef_{t}"
 
     # Taxable income: Y = (P - D) + W - Costs
@@ -395,11 +415,11 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
     # Collect plan
     plan: List[Dict] = []
     for t in T:
-        B_end_total = sum(pulp.value(B_end[(t, k)]) or 0.0 for k in sk_buckets)
+        B_end_total_val = sum(pulp.value(B_end[(t, k)]) or 0.0 for k in sk_buckets)
         if t == 1:
-            B_start_total = sum(B0[k] for k in sk_buckets)
+            B_start_total_val = sum(B0[k] for k in sk_buckets)
         else:
-            B_start_total = sum(pulp.value(B_end[(t - 1, k)]) or 0.0 for k in sk_buckets)
+            B_start_total_val = sum(pulp.value(B_end[(t - 1, k)]) or 0.0 for k in sk_buckets)
 
         if use_company:
             C_end_total = sum(pulp.value(C_end[(t, k)]) or 0.0 for k in comp_buckets)
@@ -442,11 +462,15 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
             "NetAfterTax": float(pulp.value(NetAfterTax[t]) or 0.0),
             "NPV_contrib": float(pulp.value(NPV_contrib[t]) or 0.0),
 
-            "B_start_total": float(B_start_total),
-            "B_end_total": float(B_end_total),
+            "B_start_total": float(B_start_total_val),
+            "B_end_total": float(B_end_total_val),
             "Bavg": float(pulp.value(Bavg[t]) or 0.0),
 
             "Cash_end": float(pulp.value(Cash[t]) or 0.0),
+
+            # Helpful for UI/debug:
+            "K_fast": float(K_fast),
+            "skogskonto_capital_share": float(gamma),
         })
 
     obj_val = float(pulp.value(prob.objective) or 0.0)

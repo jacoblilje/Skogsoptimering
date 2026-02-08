@@ -8,9 +8,8 @@ from forest_lp_realworld import (
     ForestPlanData, CostPool, ProportionalCost, TaxSchedule, solve_forest_lp
 )
 
-app = FastAPI(title="Skog Optimering API", version="3.0")
+app = FastAPI(title="Skog Optimering API", version="4.0")
 
-# CORS (för Lovable)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # lås till din Lovable-domän senare
@@ -47,9 +46,9 @@ def solve(req: SolveRequest):
     d = req.data
     print("INCOMING DATA:", json.dumps(d, ensure_ascii=False))
 
-    # tolerera extra fält
+    # tolerera extra fält från frontend
     d.pop("objective_discount_terminal", None)
-    d.pop("R0", None)  # om någon frontend fortfarande skickar det
+    d.pop("R0", None)
 
     pools = [CostPool(**p) for p in d.get("flexible_cost_pools", [])]
     props = [ProportionalCost(**p) for p in d.get("proportional_costs", [])]
@@ -82,10 +81,13 @@ def solve(req: SolveRequest):
         initial_cash=float(d.get("initial_cash", 200_000.0)),
         allow_negative_cash=bool(d.get("allow_negative_cash", False)),
 
-        # capital base RF (ALLTID)
+        # kapitalunderlag (deklarationslikt)
+        b10_assets_minus_liabilities=float(d.get("b10_assets_minus_liabilities", 0.0)),
+        saved_allocation_amount=float(d.get("saved_allocation_amount", 0.0)),
+        periodization_funds_sum=float(d.get("periodization_funds_sum", 0.0)),
+        expansion_fund_sum=float(d.get("expansion_fund_sum", 0.0)),
+        skogskonto_capital_share=float(d.get("skogskonto_capital_share", 0.50)),
         rf_rate=float(d.get("rf_rate", 0.08)),
-        capital_base_fixed=float(d.get("capital_base_fixed", 0.0)),
-        include_skogskonto_in_capital_base=bool(d.get("include_skogskonto_in_capital_base", True)),
         use_Bavg=bool(d.get("use_Bavg", True)),
 
         # taxes
@@ -100,10 +102,7 @@ def solve(req: SolveRequest):
     )
 
     status, obj, plan = solve_forest_lp(data)
-
     print("SOLVE RESULT:", status, obj)
-    if plan:
-        print("CASH_END:", plan[-1].get("Cash_end"))
 
     return {
         "status": status,
@@ -118,9 +117,14 @@ def solve(req: SolveRequest):
             "use_company_holding": data.use_company_holding,
             "allow_exceed_utr": data.allow_exceed_utr,
             "rf_rate": data.rf_rate,
-            "capital_base_fixed": data.capital_base_fixed,
-            "include_skogskonto_in_capital_base": data.include_skogskonto_in_capital_base,
+            "skogskonto_capital_share": data.skogskonto_capital_share,
             "use_Bavg": data.use_Bavg,
+            "capital_underlag_fast": (
+                data.b10_assets_minus_liabilities
+                + data.saved_allocation_amount
+                - data.periodization_funds_sum
+                - 0.794 * data.expansion_fund_sum
+            ),
         },
         "plan": plan,
     }

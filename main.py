@@ -14,7 +14,7 @@ def main():
         H_max=[450_000]*N,
 
         # Skogsbolagsvila (toggle)
-        use_company_holding=False,   # stäng av om det bara ska vara "bekvämlighet"
+        use_company_holding=False,
         max_years_with_company=5,
         company_initial_deposits=[(1, 200_000), (3, 100_000)],
 
@@ -32,10 +32,13 @@ def main():
         initial_cash=200_000,
         allow_negative_cash=False,
 
-        # Kapitalunderlag (ALLTID)
+        # Kapitalunderlag (deklarationslikt)
+        b10_assets_minus_liabilities=3_000_000,   # B10
+        saved_allocation_amount=200_000,          # sparat fördelningsbelopp
+        periodization_funds_sum=150_000,          # periodiseringsfonder
+        expansion_fund_sum=400_000,               # expansionsfond (hela beloppet, 79.4% dras i modellen)
+        skogskonto_capital_share=0.50,            # 50% av skogskonto ingår
         rf_rate=0.08,
-        capital_base_fixed=3_500_000,   # anskaffningsvärde + maskiner/övrigt
-        include_skogskonto_in_capital_base=True,
         use_Bavg=True,
 
         # Skatt
@@ -50,18 +53,22 @@ def main():
     )
 
     status, obj, plan = solve_forest_lp(data)
+
     print("Status:", status)
     print(f"Målfunktion (NPV av årligt netto efter skatt): {obj:,.0f} kr")
-    print("Slutkassa:", f"{plan[-1]['Cash_end']:,.0f} kr" if plan else "-")
 
-    print("\nÅr | H | P | D | W | C | L | E | R | CapBase | Tax | Net | NPV_bidrag | Cash")
+    if plan:
+        print("K_fast (deklarationslik):", f"{plan[0]['K_fast']:,.0f} kr")
+        print("Slutkassa:", f"{plan[-1]['Cash_end']:,.0f} kr")
+
+    print("\nÅr | H | P | D | W | C | L | E | CapBase | R | Tax | Net | NPV_bidrag | Cash")
     for r in plan:
         print(
             f"{r['year']:>2} | "
             f"{r['H']:>7.0f} | {r['P']:>7.0f} | {r['D']:>7.0f} | {r['W']:>7.0f} | "
-            f"{r['C_tot']:>7.0f} | {r['L']:>7.0f} | {r['E']:>7.0f} | {r['R']:>7.0f} | "
-            f"{r['CapBase']:>8.0f} | {r['TaxPaid']:>7.0f} | {r['NetAfterTax']:>7.0f} | "
-            f"{r['NPV_contrib']:>9.0f} | {r['Cash_end']:>7.0f}"
+            f"{r['C_tot']:>7.0f} | {r['L']:>7.0f} | {r['E']:>7.0f} | "
+            f"{r['CapBase']:>8.0f} | {r['R']:>7.0f} | {r['TaxPaid']:>7.0f} | "
+            f"{r['NetAfterTax']:>7.0f} | {r['NPV_contrib']:>9.0f} | {r['Cash_end']:>7.0f}"
         )
 
 if __name__ == "__main__":

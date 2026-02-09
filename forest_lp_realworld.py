@@ -127,7 +127,7 @@ def _k_fast(data: ForestPlanData) -> float:
         float(data.b10_assets_minus_liabilities)
         + float(data.saved_allocation_amount)
         - float(data.periodization_funds_sum)
-        - 0.794 * float(data.expansion_fund_sum)
+        - float(data.expansion_fund_sum)
     )
 
 
@@ -475,3 +475,4 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
 
     obj_val = float(pulp.value(prob.objective) or 0.0)
     return status_str, obj_val, plan
+

@@ -46,6 +46,9 @@ def solve(req: SolveRequest):
     d = req.data
     print("INCOMING DATA:", json.dumps(d, ensure_ascii=False))
 
+    d.pop("deposit_frac_max", None)
+    d.pop("max_years_on_account", None)
+
     # tolerera extra fält från frontend
     d.pop("objective_discount_terminal", None)
     d.pop("R0", None)
@@ -68,8 +71,6 @@ def solve(req: SolveRequest):
         company_initial_deposits=_deposits_list(d.get("company_initial_deposits")),
 
         # skogskonto
-        deposit_frac_max=float(d.get("deposit_frac_max", 0.60)),
-        max_years_on_account=int(d.get("max_years_on_account", 10)),
         B0_remaining=_int_key_dict(d.get("B0_remaining")),
 
         # costs
@@ -128,3 +129,4 @@ def solve(req: SolveRequest):
         },
         "plan": plan,
     }
+

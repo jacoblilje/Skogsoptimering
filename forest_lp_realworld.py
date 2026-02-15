@@ -63,8 +63,8 @@ class ForestPlanData:
     # --------------------------
     # Skogskonto
     # --------------------------
-    deposit_frac_max: float = 0.60
-    max_years_on_account: int = 10
+    #deposit_frac_max: float = 0.60
+    #max_years_on_account: int = 10
     # Initial skogskonto buckets at start of year 1: {remaining_years: amount}
     B0_remaining: Optional[Dict[int, float]] = None
 
@@ -152,7 +152,8 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
       - Objective: maximize NPV of NetAfterTax (annual discounted)
       - Cash: Cash[t] evolves with NetAfterTax; optionally nonnegative.
     """
-
+    DEPOSIT_FRAC_MAX = 0.60
+    MAX_YEARS_ON_ACCOUNT = 10
     N = int(data.N)
     T = range(1, N + 1)
 
@@ -163,7 +164,7 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         raise ValueError("fixed_costs must be length N or None")
 
     # --- Skogskonto buckets ---
-    K = int(data.max_years_on_account)
+    K = MAX_YEARS_ON_ACCOUNT
     sk_buckets = range(1, K + 1)
     B0_in = data.B0_remaining or {}
     B0 = {k: float(B0_in.get(k, 0.0)) for k in sk_buckets}
@@ -290,7 +291,8 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
 
     # Skogskonto deposit cap based on payout P
     for t in T:
-        prob += D[t] <= float(data.deposit_frac_max) * P[t], f"DepositCap_{t}"
+        prob += D[t] <= DEPOSIT_FRAC_MAX * P[t], f"DepositCap_{t}"
+
 
     # Withdrawals sum
     for t in T:
@@ -475,4 +477,5 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
 
     obj_val = float(pulp.value(prob.objective) or 0.0)
     return status_str, obj_val, plan
+
 

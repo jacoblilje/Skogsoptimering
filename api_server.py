@@ -8,11 +8,11 @@ from forest_lp_realworld import (
     ForestPlanData, CostPool, ProportionalCost, TaxSchedule, solve_forest_lp
 )
 
-app = FastAPI(title="Skog Optimering API", version="4.0")
+app = FastAPI(title="Skog Optimering API", version="5.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # lås till din Lovable-domän senare
+    allow_origins=["*"],  # las till din Lovable-doman senare
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,7 +49,7 @@ def solve(req: SolveRequest):
     d.pop("deposit_frac_max", None)
     d.pop("max_years_on_account", None)
 
-    # tolerera extra fält från frontend
+    # tolerera extra falt fran frontend
     d.pop("objective_discount_terminal", None)
     d.pop("R0", None)
 
@@ -72,6 +72,17 @@ def solve(req: SolveRequest):
 
         # skogskonto
         B0_remaining=_int_key_dict(d.get("B0_remaining")),
+
+        # periodiseringsfond
+        use_periodiseringsfond=bool(d.get("use_periodiseringsfond", True)),
+        periodiseringsfond_max_frac=float(d.get("periodiseringsfond_max_frac", 0.30)),
+        periodiseringsfond_max_years=int(d.get("periodiseringsfond_max_years", 6)),
+        PF_B0_remaining=_int_key_dict(d.get("PF_B0_remaining")),
+
+        # expansionsfond
+        use_expansionsfond=bool(d.get("use_expansionsfond", True)),
+        expansionsfond_tax_rate=float(d.get("expansionsfond_tax_rate", 0.206)),
+        EF_initial_balance=float(d.get("EF_initial_balance", 0.0)),
 
         # costs
         fixed_costs=d.get("fixed_costs"),
@@ -111,8 +122,10 @@ def solve(req: SolveRequest):
         "objective": float(obj),  # alias for Lovable KPI
         "kpis": {
             "objective_npv": float(obj),
-            "objective_label": "NPV av årligt netto efter skatt",
+            "objective_label": "NPV av arligt netto efter skatt",
             "cash_end": float(plan[-1]["Cash_end"]) if plan else None,
+            "pf_end_total": float(plan[-1]["PF_end_total"]) if plan else 0.0,
+            "ef_bal_end": float(plan[-1]["EF_bal"]) if plan else 0.0,
         },
         "policy_used": {
             "use_company_holding": data.use_company_holding,
@@ -120,13 +133,10 @@ def solve(req: SolveRequest):
             "rf_rate": data.rf_rate,
             "skogskonto_capital_share": data.skogskonto_capital_share,
             "use_Bavg": data.use_Bavg,
-            "capital_underlag_fast": (
-                data.b10_assets_minus_liabilities
-                + data.saved_allocation_amount
-                - data.periodization_funds_sum
-                - 0.794 * data.expansion_fund_sum
-            ),
+            "use_periodiseringsfond": data.use_periodiseringsfond,
+            "use_expansionsfond": data.use_expansionsfond,
+            "expansionsfond_tax_rate": data.expansionsfond_tax_rate,
+            "capital_underlag_fast": plan[0]["K_fast"] if plan else 0.0,
         },
         "plan": plan,
     }
-

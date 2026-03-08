@@ -1,4 +1,4 @@
-# report_pdf.py
+# report_pdf.py  –  v6.0
 from typing import Dict, List
 import os
 
@@ -11,15 +11,16 @@ from reportlab.lib import colors
 
 def _save_dashboard_png(plan: List[Dict], path_png: str):
     """
-    Dashboard med 8 paneler:
+    Dashboard med 9 paneler:
       1) Avverkning H vs Utbetalning P
       2) Skogsbolagskonto saldo
       3) Skogskonto (D, W, saldo, Bavg)
-      4) Periodiseringsfond (PF_D, PF_W, saldo)
-      5) Expansionsfond (EF_D, EF_W, saldo, EF_tax)
-      6) Utrymme R och Y+
-      7) Skatteuppdelning (TaxL/TaxE/TaxPaid)
-      8) Netto efter skatt + NPV-bidrag + Kassa
+      4) Skogsavdrag (SA per ar, kumulativt, kvar)
+      5) Periodiseringsfond (PF_D, PF_W, saldo)
+      6) Expansionsfond (EF_D, EF_W, saldo, EF_tax)
+      7) Utrymme R och Y+
+      8) Skatteuppdelning (TaxL/TaxE/TaxPaid)
+      9) Netto efter skatt + NPV-bidrag + Kassa
     """
     years = [r["year"] for r in plan]
     H = [r.get("H", 0.0) for r in plan]
@@ -34,6 +35,10 @@ def _save_dashboard_png(plan: List[Dict], path_png: str):
 
     B = [r.get("B_end_total", 0.0) for r in plan]
     Bavg = [r.get("Bavg", 0.0) for r in plan]
+
+    sa_vals = [r.get("SA", 0.0) for r in plan]
+    sa_cum = [r.get("SA_cumulative", 0.0) for r in plan]
+    sa_rem = [r.get("SA_remaining", 0.0) for r in plan]
 
     pf_d = [r.get("PF_D", 0.0) for r in plan]
     pf_w = [r.get("PF_W", 0.0) for r in plan]
@@ -61,7 +66,7 @@ def _save_dashboard_png(plan: List[Dict], path_png: str):
         s += v
         cum_npv.append(s)
 
-    fig, axes = plt.subplots(8, 1, figsize=(10, 22), sharex=True)
+    fig, axes = plt.subplots(9, 1, figsize=(10, 26), sharex=True)
 
     # 1) H vs P vs Costs
     axes[0].plot(years, H, marker="o", label="Avverkning (H)")
@@ -87,46 +92,54 @@ def _save_dashboard_png(plan: List[Dict], path_png: str):
     axes[2].grid(True)
     axes[2].legend(fontsize=7)
 
-    # 4) Periodiseringsfond
-    axes[3].plot(years, pf_d, marker="o", label="PF avsattning")
-    axes[3].plot(years, pf_w, marker="o", label="PF aterforing")
-    axes[3].plot(years, pf_bal, marker="o", label="PF saldo (slut)")
-    axes[3].set_title("Periodiseringsfond")
+    # 4) Skogsavdrag
+    axes[3].bar(years, sa_vals, alpha=0.7, label="Skogsavdrag (SA)")
+    axes[3].plot(years, sa_cum, marker="o", label="Kumulativt utnyttjat", color="red")
+    axes[3].plot(years, sa_rem, marker="o", label="Aterstaende utrymme", color="green")
+    axes[3].set_title("Skogsavdrag")
     axes[3].grid(True)
     axes[3].legend(fontsize=7)
 
-    # 5) Expansionsfond
-    axes[4].plot(years, ef_d, marker="o", label="EF avsattning")
-    axes[4].plot(years, ef_w, marker="o", label="EF aterforing")
-    axes[4].plot(years, ef_bal, marker="o", label="EF saldo (slut)")
-    axes[4].plot(years, ef_tax, marker="o", label="EF skatt (20.6%)")
-    axes[4].set_title("Expansionsfond")
+    # 5) Periodiseringsfond
+    axes[4].plot(years, pf_d, marker="o", label="PF avsattning")
+    axes[4].plot(years, pf_w, marker="o", label="PF aterforing")
+    axes[4].plot(years, pf_bal, marker="o", label="PF saldo (slut)")
+    axes[4].set_title("Periodiseringsfond")
     axes[4].grid(True)
     axes[4].legend(fontsize=7)
 
-    # 6) R and Y+
-    axes[5].plot(years, Rv, marker="o", label="Utdelningsutrymme R")
-    axes[5].plot(years, Y, marker="o", label="Beskattad vinst Y+")
-    axes[5].set_title("Rantefordelning: R vs Y+")
+    # 6) Expansionsfond
+    axes[5].plot(years, ef_d, marker="o", label="EF avsattning")
+    axes[5].plot(years, ef_w, marker="o", label="EF aterforing")
+    axes[5].plot(years, ef_bal, marker="o", label="EF saldo (slut)")
+    axes[5].plot(years, ef_tax, marker="o", label="EF skatt (20.6%)")
+    axes[5].set_title("Expansionsfond")
     axes[5].grid(True)
     axes[5].legend(fontsize=7)
 
-    # 7) Tax split
-    axes[6].plot(years, tax_L, marker="o", label="Skatt(L) = 30% * L")
-    axes[6].plot(years, tax_E, marker="o", label="Skatt(E) = g(E)")
-    axes[6].plot(years, tax_tot, marker="o", label="Skatt total")
-    axes[6].set_title("Skatteuppdelning")
+    # 7) R and Y+
+    axes[6].plot(years, Rv, marker="o", label="Utdelningsutrymme R")
+    axes[6].plot(years, Y, marker="o", label="Beskattad vinst Y+")
+    axes[6].set_title("Rantefordelning: R vs Y+")
     axes[6].grid(True)
     axes[6].legend(fontsize=7)
 
-    # 8) Net, NPV, Cash
-    axes[7].plot(years, net, marker="o", label="NetAfterTax")
-    axes[7].plot(years, npv_contrib, marker="o", label="NPV-bidrag")
-    axes[7].plot(years, cash, marker="o", label="Kassa (slut)")
-    axes[7].plot(years, cum_npv, marker="o", label="Ack. NPV")
-    axes[7].set_title("Netto, NPV & Kassa")
+    # 8) Tax split
+    axes[7].plot(years, tax_L, marker="o", label="Skatt(L) = 30% * L")
+    axes[7].plot(years, tax_E, marker="o", label="Skatt(E) = g(E)")
+    axes[7].plot(years, tax_tot, marker="o", label="Skatt total")
+    axes[7].set_title("Skatteuppdelning")
     axes[7].grid(True)
     axes[7].legend(fontsize=7)
+
+    # 9) Net, NPV, Cash
+    axes[8].plot(years, net, marker="o", label="NetAfterTax")
+    axes[8].plot(years, npv_contrib, marker="o", label="NPV-bidrag")
+    axes[8].plot(years, cash, marker="o", label="Kassa (slut)")
+    axes[8].plot(years, cum_npv, marker="o", label="Ack. NPV")
+    axes[8].set_title("Netto, NPV & Kassa")
+    axes[8].grid(True)
+    axes[8].legend(fontsize=7)
 
     plt.tight_layout()
     fig.savefig(path_png, dpi=160)
@@ -140,26 +153,29 @@ def _add_variable_glossary(story, styles):
         ["H", "Avverkning (varde som skapas hos skogsbolaget detta ar)."],
         ["P", "Utbetalning fran skogsbolaget till verksamheten detta ar (optimeras)."],
         ["Bolag start/slut", "Saldo hos skogsbolaget vid arets start/slut. Bucket-system med deadline X ar."],
-        ["D", "Insattning skogskonto (max 60% av P)."],
+        ["D", "Insattning skogskonto (max 60% avverkningsratt + 40% leveransvirke)."],
         ["W", "Uttag fran skogskonto (inkl. tvingade uttag p.g.a. 10-arsregel)."],
+        ["SA", "Skogsavdrag: minskar naringsinkomst. Max 50% av avv.ratt + 30% av lev.virke per ar."],
+        ["SA_cumulative", "Ackumulerat utnyttjat skogsavdrag (livstidstak = 50% av anskaffningsvarde)."],
         ["PF_D", "Avsattning till periodiseringsfond (max 30% av naringsinkomst)."],
         ["PF_W", "Aterforing fran periodiseringsfond (tvingad efter 6 ar)."],
         ["PF saldo", "Totalt saldo i periodiseringsfonden vid arets slut."],
         ["EF_D", "Avsattning till expansionsfond (beskattas med 20.6% vid avsattning)."],
         ["EF_W", "Aterforing fran expansionsfond (beskattas som naringsinkomst)."],
-        ["EF saldo", "Saldo i expansionsfonden vid arets slut."],
+        ["EF saldo", "Saldo i expansionsfonden vid arets slut. Max 125.94% av kapitalunderlag."],
         ["EF skatt", "Expansionsfondsskatt (20.6% av avsattning)."],
         ["Kostn", "Totala kostnader detta ar (fasta + flex + proportionella)."],
-        ["Y+", "Beskattningsbar vinst (positiv del): max((P-D)+W-Kostn-PF_D+PF_W-EF_D+EF_W, 0)."],
+        ["Y+", "Beskattningsbar vinst: max((P-D)+W-Kostn-SA-PF_D+PF_W-EF_D+EF_W, 0)."],
         ["L", "Del av Y+ inom R (rantefordelning). Beskattas som kapital: 30%."],
         ["E", "Del av Y+ over R. Beskattas progressivt enligt taxkurva g(E)."],
         ["Skatt(L)", "0.30 * L."],
         ["Skatt(E)", "g(E): styckvis linjar marginalskattkurva."],
         ["Skatt tot", "Skatt(L) + Skatt(E) + EF skatt."],
-        ["NetAfterTax", "Arets netto efter skatt: (P-D)+W-Kostn-PF_D+PF_W-EF_D+EF_W-Skatt."],
+        ["NetAfterTax", "Arets netto efter skatt: (P-D)+W-Kostn-Skatt tot (rent kassaflode)."],
         ["NPV-bidrag", "disc(t)*NetAfterTax[t]. Malfunktionen summerar dessa."],
         ["R", "Rantefordelningsutrymme. R = rf_rate * CapBase."],
-        ["CapBase", "Kapitalunderlag = K_base - PF_total - 0.794*EF_bal + gamma*Bavg."],
+        ["CapBase", "Kapitalunderlag = B10 + SparatFB - PF_total - 0.794*EF_bal + gamma*Bavg."],
+        ["SparatFB", "Sparat fordelningsbelopp (dynamiskt: okar med oanvant R)."],
         ["Bavg", "Genomsnittligt skogskontosaldo = (startsaldo + slutsaldo)/2."],
         ["B_slut", "Skogskontosaldo vid arets slut (summa over buckets)."],
         ["Kassa_slut", "Kassasaldo vid arets slut. Constraint: Kassa_slut >= 0 (om aktiverat)."],
@@ -214,15 +230,17 @@ def _add_tax_split_table(story, styles, plan: List[Dict]):
 
 
 def _add_funds_table(story, styles, plan: List[Dict]):
-    """Dedicated table for Periodiseringsfond and Expansionsfond per year."""
-    story.append(Paragraph("<b>Periodiseringsfond &amp; Expansionsfond per ar</b>", styles["Heading3"]))
+    """Dedicated table for Skogsavdrag, Periodiseringsfond and Expansionsfond per year."""
+    story.append(Paragraph("<b>Skogsavdrag, Periodiseringsfond &amp; Expansionsfond per ar</b>", styles["Heading3"]))
     story.append(Spacer(1, 6))
 
-    header = ["Ar", "PF_D", "PF_W", "PF saldo", "EF_D", "EF_W", "EF saldo", "EF skatt"]
+    header = ["Ar", "SA", "SA_ack", "PF_D", "PF_W", "PF saldo", "EF_D", "EF_W", "EF saldo", "EF skatt"]
     rows = [header]
     for r in plan:
         rows.append([
             r.get("year", ""),
+            f"{r.get('SA', 0.0):,.0f}",
+            f"{r.get('SA_cumulative', 0.0):,.0f}",
             f"{r.get('PF_D', 0.0):,.0f}",
             f"{r.get('PF_W', 0.0):,.0f}",
             f"{r.get('PF_end_total', 0.0):,.0f}",
@@ -271,6 +289,8 @@ def export_pdf_report(
     terminal_comp = plan[-1].get("Company_end_total", 0.0) if plan else 0.0
     terminal_pf = plan[-1].get("PF_end_total", 0.0) if plan else 0.0
     terminal_ef = plan[-1].get("EF_bal", 0.0) if plan else 0.0
+    terminal_sa = plan[-1].get("SA_cumulative", 0.0) if plan else 0.0
+    terminal_sa_rem = plan[-1].get("SA_remaining", 0.0) if plan else 0.0
 
     story.append(Paragraph(f"<b>Status:</b> {status}", styles["Normal"]))
     story.append(Paragraph(f"<b>Malfunktion:</b> NPV av arligt netto efter skatt = {objective_value:,.0f} kr", styles["Normal"]))
@@ -278,13 +298,14 @@ def export_pdf_report(
     story.append(Paragraph(f"<b>Bolagssaldo vid slut:</b> {terminal_comp:,.0f} kr", styles["Normal"]))
     story.append(Paragraph(f"<b>Periodiseringsfond vid slut:</b> {terminal_pf:,.0f} kr", styles["Normal"]))
     story.append(Paragraph(f"<b>Expansionsfond vid slut:</b> {terminal_ef:,.0f} kr", styles["Normal"]))
+    story.append(Paragraph(f"<b>Skogsavdrag utnyttjat:</b> {terminal_sa:,.0f} kr (kvar: {terminal_sa_rem:,.0f} kr)", styles["Normal"]))
     story.append(Spacer(1, 10))
 
-    # ---- Huvudtabell (inkl H, P och bolagssaldo) ----
+    # ---- Huvudtabell (inkl H, P, SA och bolagssaldo) ----
     header = [
         "Ar", "H", "P",
         "Bolag_start", "Bolag_slut",
-        "D", "W",
+        "D", "W", "SA",
         "Kostn", "Y+",
         "Skatt", "Net",
         "NPV-bidrag",
@@ -301,6 +322,7 @@ def export_pdf_report(
             f"{r.get('Company_end_total', 0.0):,.0f}",
             f"{r.get('D', 0.0):,.0f}",
             f"{r.get('W', 0.0):,.0f}",
+            f"{r.get('SA', 0.0):,.0f}",
             f"{r.get('C_tot', 0.0):,.0f}",
             f"{r.get('Ypos', 0.0):,.0f}",
             f"{r.get('TaxPaid', 0.0):,.0f}",
@@ -334,7 +356,7 @@ def export_pdf_report(
 
     story.append(Paragraph("<b>Oversiktsgrafer</b>", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(Image(png_path, width=500, height=900))
+    story.append(Image(png_path, width=500, height=1000))
     story.append(Spacer(1, 12))
 
     # ---- Forklaringar ----

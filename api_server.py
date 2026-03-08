@@ -1,4 +1,4 @@
-# api_server.py
+# api_server.py  –  v6.0
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -8,7 +8,7 @@ from forest_lp_realworld import (
     ForestPlanData, CostPool, ProportionalCost, TaxSchedule, solve_forest_lp
 )
 
-app = FastAPI(title="Skog Optimering API", version="5.0")
+app = FastAPI(title="Skog Optimering API", version="6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,10 +46,9 @@ def solve(req: SolveRequest):
     d = req.data
     print("INCOMING DATA:", json.dumps(d, ensure_ascii=False))
 
+    # tolerera extra falt fran frontend (bakåtkompatibilitet)
     d.pop("deposit_frac_max", None)
     d.pop("max_years_on_account", None)
-
-    # tolerera extra falt fran frontend
     d.pop("objective_discount_terminal", None)
     d.pop("R0", None)
 
@@ -73,6 +72,14 @@ def solve(req: SolveRequest):
         # skogskonto
         B0_remaining=_int_key_dict(d.get("B0_remaining")),
 
+        # FIX 4: 60/40 split
+        andel_avverkningsratt=float(d.get("andel_avverkningsratt", 1.0)),
+
+        # FIX 5: skogsavdrag
+        use_skogsavdrag=bool(d.get("use_skogsavdrag", False)),
+        skogsavdrag_total_utrymme=float(d.get("skogsavdrag_total_utrymme", 0.0)),
+        skogsavdrag_already_used=float(d.get("skogsavdrag_already_used", 0.0)),
+
         # periodiseringsfond
         use_periodiseringsfond=bool(d.get("use_periodiseringsfond", True)),
         periodiseringsfond_max_frac=float(d.get("periodiseringsfond_max_frac", 0.30)),
@@ -83,6 +90,9 @@ def solve(req: SolveRequest):
         use_expansionsfond=bool(d.get("use_expansionsfond", True)),
         expansionsfond_tax_rate=float(d.get("expansionsfond_tax_rate", 0.206)),
         EF_initial_balance=float(d.get("EF_initial_balance", 0.0)),
+
+        # FIX 3: EF cap
+        ef_kapitalunderlag_for_cap=float(d.get("ef_kapitalunderlag_for_cap", 0.0)),
 
         # costs
         fixed_costs=d.get("fixed_costs"),
@@ -99,7 +109,9 @@ def solve(req: SolveRequest):
         periodization_funds_sum=float(d.get("periodization_funds_sum", 0.0)),
         expansion_fund_sum=float(d.get("expansion_fund_sum", 0.0)),
         skogskonto_capital_share=float(d.get("skogskonto_capital_share", 0.50)),
-        rf_rate=float(d.get("rf_rate", 0.08)),
+
+        # FIX 2: updated default
+        rf_rate=float(d.get("rf_rate", 0.0855)),
         use_Bavg=bool(d.get("use_Bavg", True)),
 
         # taxes
@@ -116,6 +128,10 @@ def solve(req: SolveRequest):
     status, obj, plan = solve_forest_lp(data)
     print("SOLVE RESULT:", status, obj)
 
+    # Compute summary KPIs
+    sa_total = plan[-1].get("SA_cumulative", 0.0) if plan else 0.0
+    sa_remaining = plan[-1].get("SA_remaining", 0.0) if plan else 0.0
+
     return {
         "status": status,
         "objective_npv": float(obj),
@@ -126,6 +142,10 @@ def solve(req: SolveRequest):
             "cash_end": float(plan[-1]["Cash_end"]) if plan else None,
             "pf_end_total": float(plan[-1]["PF_end_total"]) if plan else 0.0,
             "ef_bal_end": float(plan[-1]["EF_bal"]) if plan else 0.0,
+            "sa_total_used": float(sa_total),
+            "sa_remaining": float(sa_remaining),
+            "sparat_fb_end": float(plan[-1].get("SparatFB", 0.0)) if plan else 0.0,
+            "skogskonto_deposit_frac_eff": float(plan[0].get("skogskonto_deposit_frac_eff", 0.6)) if plan else 0.6,
         },
         "policy_used": {
             "use_company_holding": data.use_company_holding,
@@ -137,6 +157,9 @@ def solve(req: SolveRequest):
             "use_expansionsfond": data.use_expansionsfond,
             "expansionsfond_tax_rate": data.expansionsfond_tax_rate,
             "capital_underlag_fast": plan[0]["K_fast"] if plan else 0.0,
+            "andel_avverkningsratt": data.andel_avverkningsratt,
+            "use_skogsavdrag": data.use_skogsavdrag,
+            "ef_kapitalunderlag_for_cap": data.ef_kapitalunderlag_for_cap,
         },
         "plan": plan,
     }

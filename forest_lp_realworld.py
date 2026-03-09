@@ -1,4 +1,4 @@
-# forest_lp_realworld.py  –  v6.0
+# forest_lp_realworld.py  –  v8.0  (FIX 9-19)
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -66,6 +66,10 @@ class ForestPlanData:
     # Remainder is leveransvirke. Affects skogskonto deposit cap:
     #   D <= 0.60 * andel_avvr * P + 0.40 * (1 - andel_avvr) * P
     andel_avverkningsratt: float = 1.0  # default: all rotpost
+    # FIX 14: Interest on skogskonto (net after 15% source tax; 0% from Apr 2026)
+    skogskonto_interest_rate: float = 0.0  # annual net rate on skogskonto balances
+    # FIX 16: Skogsskadekonto – higher deposit limits for storm/insect damage
+    use_skogsskadekonto: bool = False  # if True: 80% rotpost + 50% leveransvirke
 
     # --------------------------
     # Skogsavdrag  (FIX 5)
@@ -75,6 +79,9 @@ class ForestPlanData:
     skogsavdrag_already_used: float = 0.0    # already claimed in prior years
     # Per-year cap: 50% of avverkningsratt + 30% of leveransvirke
     # (uses andel_avverkningsratt to split)
+    # FIX 17: Rationaliseringsförvärv – higher deductions (100% rot + 60% leverans)
+    is_rationaliseringsforvarv: bool = False
+    rationaliseringsforvarv_years_left: int = 0  # years remaining of 6-year window
 
     # --------------------------
     # Periodiseringsfond (6-year FIFO buckets, max 30% of nettoinkomst)
@@ -119,7 +126,10 @@ class ForestPlanData:
 
     # FIX 2: updated default to SLR Nov2024 (2.55%) + 6% = 8.55%
     rf_rate: float = 0.0855
-    use_Bavg: bool = True
+    # FIX 15: Negativ räntefördelning (SLR + 1%, threshold -500k from 2025)
+    neg_rf_rate: float = 0.0355  # SLR 2.55% + 1%
+    neg_rf_threshold: float = -500_000.0  # only applies if CapBase < this
+    use_Bavg: bool = True  # DEPRECATED – kapitalunderlag uses start-of-year balance (legally correct)
 
     # --------------------------
     # Taxes  (FIX 1: real rates)
@@ -156,13 +166,20 @@ def _k_fast_base(data: ForestPlanData) -> float:
 
 def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None):
     """
-    LP model v6 with all 6 fixes:
-      1. Real tax brackets (skiktgrans 643k, egenavgifter, schablonavdrag)
-      2. rf_rate default 8.55% (SLR 2.55% + 6%)
-      3. EF cap: EF_bal <= 125.94% of ef_kapitalunderlag_for_cap
-      4. Skogskonto 60/40: D <= 0.60*andel*P + 0.40*(1-andel)*P
-      5. Skogsavdrag: reduces naringsinkomst, lifetime cap
-      6. Dynamic kapitalunderlag: sparat fordelningsbelopp evolves
+    LP model v8 with fixes 1-19:
+      1-8. Previous fixes (tax brackets, rf_rate, EF cap/credit, 60/40,
+           skogsavdrag, dynamic kapitalunderlag, ingaende saldon, EF credit)
+      9.  Skogskontoinsattning far ej medfora underskott
+      10. Sparat fordelningsbelopp adderas till R
+      11. (tax_curve.py) Egenavgiftscirkularitet
+      12. EF cap dynamiskt (baserat pa CapBase)
+      13. (tax_curve.py) Alla kommuner
+      14. Ranta pa skogskonto
+      15. Negativ rantefordelning
+      16. Skogsskadekonto (forhojda depositionslimiter)
+      17. Rationaliseringsforvarv for skogsavdrag
+      18. (tax_curve.py) Inkomstsarsdata
+      19. Min 5000 kr insattning (postprocessing-varning)
     """
     MAX_YEARS_ON_ACCOUNT = 10
     N = int(data.N)
@@ -173,15 +190,24 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
     if data.fixed_costs is not None and len(data.fixed_costs) != N:
         raise ValueError("fixed_costs must be length N or None")
 
-    # --- FIX 4: Skogskonto effective deposit fraction ---
+    # --- FIX 4 + FIX 16: Skogskonto effective deposit fraction ---
     andel = float(data.andel_avverkningsratt)
-    DEPOSIT_FRAC_EFF = 0.60 * andel + 0.40 * (1.0 - andel)
+    if bool(data.use_skogsskadekonto):
+        # FIX 16: Skogsskadekonto – 80% rotpost + 50% leveransvirke
+        DEPOSIT_FRAC_EFF = 0.80 * andel + 0.50 * (1.0 - andel)
+    else:
+        DEPOSIT_FRAC_EFF = 0.60 * andel + 0.40 * (1.0 - andel)
 
-    # --- FIX 5: Skogsavdrag ---
+    # --- FIX 5 + FIX 17: Skogsavdrag ---
     use_sa = bool(data.use_skogsavdrag)
     sa_remaining = max(0.0, float(data.skogsavdrag_total_utrymme) - float(data.skogsavdrag_already_used))
-    # Per-year cap fractions: 50% of avverkningsratt + 30% of leveransvirke
-    sa_year_frac = 0.50 * andel + 0.30 * (1.0 - andel)  # effective fraction of P
+    is_rat = bool(data.is_rationaliseringsforvarv) and int(data.rationaliseringsforvarv_years_left) > 0
+    if is_rat:
+        # FIX 17: Rationaliseringsförvärv – 100% rot + 60% leverans
+        sa_year_frac = 1.00 * andel + 0.60 * (1.0 - andel)
+    else:
+        # Standard: 50% rot + 30% leverans
+        sa_year_frac = 0.50 * andel + 0.30 * (1.0 - andel)
 
     # --- Skogskonto buckets ---
     K = MAX_YEARS_ON_ACCOUNT
@@ -218,7 +244,7 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
     ef_tau = float(data.expansionsfond_tax_rate) if use_ef else 0.0
     ef_init = float(data.EF_initial_balance) if use_ef else 0.0
     ef_cap_base = float(data.ef_kapitalunderlag_for_cap) if use_ef else 0.0
-    ef_max_bal = 1.2594 * ef_cap_base if ef_cap_base > 0 else None  # FIX 3
+    # FIX 12: EF cap is now dynamic (see constraint after CapBase definition)
 
     # --- Tax schedule ---
     tax = data.tax or TaxSchedule(brackets=[(10**12, 0.70)], base_tax=0.0)
@@ -264,7 +290,7 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         EF_D_var = pulp.LpVariable.dicts("EF_D", T, lowBound=0)
         EF_W_var = pulp.LpVariable.dicts("EF_W", T, lowBound=0)
         EF_bal = pulp.LpVariable.dicts("EF_bal", T, lowBound=0)
-        EF_tax_var = pulp.LpVariable.dicts("EF_tax", T, lowBound=0)
+        EF_tax_var = pulp.LpVariable.dicts("EF_tax", T, lowBound=None)  # FIX 8: allow negative (credit on withdrawal)
     else:
         EF_D_var = EF_W_var = EF_bal = EF_tax_var = None
 
@@ -387,6 +413,11 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         # Lifetime cap
         prob += pulp.lpSum(SA[t] for t in T) <= sa_remaining, f"SALifetimeCap"
 
+    # --- FIX 9: Skogskontoinsattning far ej medfora underskott ---
+    # Nettoinkomst efter skogskontoinsattning och uttag minus kostnader >= 0
+    for t in T:
+        prob += (P[t] - D[t]) + W[t] - total_cost_expr(t) >= 0, f"NoUnderskott_{t}"
+
     # --- Periodiseringsfond ---
     if use_pf:
         pf_frac = float(data.periodiseringsfond_max_frac)
@@ -420,10 +451,8 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
                 prob += EF_W_var[t] <= ef_init, f"EFWithdrawCap_{t}"
             else:
                 prob += EF_W_var[t] <= EF_bal[t - 1], f"EFWithdrawCap_{t}"
-            prob += EF_tax_var[t] == ef_tau * EF_D_var[t], f"EFTaxDef_{t}"
-            # FIX 3: EF balance cap
-            if ef_max_bal is not None:
-                prob += EF_bal[t] <= ef_max_bal, f"EFMaxBal_{t}"
+            # FIX 8: Net EF tax – credit 20.6% back on withdrawals (återföring)
+            prob += EF_tax_var[t] == ef_tau * (EF_D_var[t] - EF_W_var[t]), f"EFTaxDef_{t}"
 
     # --- FIX 6: Dynamic kapitalunderlag ---
     # sparat fordelningsbelopp evolves:
@@ -444,15 +473,38 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
             # sparat grows by unused R: R[t-1] - L[t-1]
             prob += SparatFB[t] == SparatFB[t - 1] + R_var[t - 1] - L[t - 1], f"SparatFBDyn_{t}"
 
+    # FIX 7: Kapitalunderlag baseras på INGÅENDE saldon (föregående räkenskapsårs utgång)
+    #         Korrekt enl. Skatteverket/SKV 2196. Gäller skogskonto, PF och EF.
     for t in T:
-        B_end_total_t = pulp.lpSum(B_end[(t, k)] for k in sk_buckets)
-        sk_component = Bavg[t] if data.use_Bavg else B_end_total_t
+        # Skogskonto – ingående saldo (B_start), INTE slutsaldo eller genomsnitt
+        B_start_total_t = (
+            sum(B0[k] for k in sk_buckets) if t == 1
+            else pulp.lpSum(B_end[(t - 1, k)] for k in sk_buckets)
+        )
 
-        pf_total_t = pulp.lpSum(PF_end[(t, k)] for k in pf_buckets) if use_pf else static_pf_deduction
-        ef_component_t = 0.794 * EF_bal[t] if use_ef else static_ef_deduction
+        # Periodiseringsfond – ingående saldo
+        if use_pf:
+            pf_start_t = (
+                sum(PF_B0[k] for k in pf_buckets) if t == 1
+                else pulp.lpSum(PF_end[(t - 1, k)] for k in pf_buckets)
+            )
+        else:
+            pf_start_t = static_pf_deduction
 
-        prob += CapBase[t] == K_b10 + SparatFB[t] - pf_total_t - ef_component_t + gamma * sk_component, f"CapBaseDef_{t}"
+        # Expansionsfond – ingående saldo
+        if use_ef:
+            ef_start_t = ef_init if t == 1 else EF_bal[t - 1]
+            ef_component_t = 0.794 * ef_start_t
+        else:
+            ef_component_t = static_ef_deduction
+
+        prob += CapBase[t] == K_b10 + SparatFB[t] - pf_start_t - ef_component_t + gamma * B_start_total_t, f"CapBaseDef_{t}"
         prob += R_var[t] == rf * CapBase[t], f"RDef_{t}"
+
+    # --- FIX 12: Dynamic EF cap (EF balance <= 125.94% of kapitalunderlag) ---
+    if use_ef and ef_cap_base > 0:
+        for t in T:
+            prob += EF_bal[t] <= 1.2594 * CapBase[t], f"EFMaxBal_{t}"
 
     # --- Taxable income ---
     # Y = (P - D) + W - Costs - SA - PF_D + PF_W - EF_D + EF_W
@@ -466,7 +518,7 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
             Y_expr = Y_expr - EF_D_var[t] + EF_W_var[t]
         prob += Y_expr == Ypos[t] - Yneg[t], f"YSplit_{t}"
         prob += L[t] + E[t] == Ypos[t], f"LESum_{t}"
-        prob += L[t] <= R_var[t], f"LowTaxCap_{t}"
+        prob += L[t] <= R_var[t] + SparatFB[t], f"LowTaxCap_{t}"  # FIX 10: Total = R + SparatFB
         if not data.allow_exceed_utr:
             prob += E[t] == 0.0, f"NoExceedUtr_{t}"
 
@@ -496,18 +548,23 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         prob += NetAfterTax[t] == (P[t] - D[t]) + W[t] - total_cost_expr(t) - TaxPaid[t], f"NetAfterTaxDef_{t}"
 
     # --- Cash dynamics ---
+    # FIX 14: Add skogskonto interest (kapitalinkomst, ej naringsinkomst)
+    sk_interest = float(data.skogskonto_interest_rate)
     for t in T:
+        interest_term = sk_interest * Bavg[t] if sk_interest > 0 else 0
         if t == 1:
-            prob += Cash[t] == float(data.initial_cash) + NetAfterTax[t], f"CashInit_{t}"
+            prob += Cash[t] == float(data.initial_cash) + NetAfterTax[t] + interest_term, f"CashInit_{t}"
         else:
-            prob += Cash[t] == Cash[t - 1] + NetAfterTax[t], f"CashDyn_{t}"
+            prob += Cash[t] == Cash[t - 1] + NetAfterTax[t] + interest_term, f"CashDyn_{t}"
         if not data.allow_negative_cash:
             prob += Cash[t] >= 0.0, f"CashNonNeg_{t}"
 
     # --- NPV & Objective ---
+    # FIX 14: Include skogskonto interest in NPV (real economic value)
     for t in T:
         disc = discount_factor(t, float(data.discount_rate))
-        prob += NPV_contrib[t] == disc * NetAfterTax[t], f"NPVContribDef_{t}"
+        interest_npv = disc * sk_interest * Bavg[t] if sk_interest > 0 else 0
+        prob += NPV_contrib[t] == disc * NetAfterTax[t] + interest_npv, f"NPVContribDef_{t}"
 
     # Terminal value penalty for deferred tax in funds
     terminal_disc = discount_factor(N, float(data.discount_rate))
@@ -568,10 +625,10 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
         sa_cumulative += sa_val
         sa_remaining_val = max(0.0, float(data.skogsavdrag_total_utrymme) - sa_cumulative)
 
-        # Dynamic K_fast for display
+        # Dynamic K_fast for display (uses start-of-year balances, matching CapBase)
         K_fast_display = K_b10 + float(pulp.value(SparatFB[t]) or 0.0)
-        K_fast_display -= pf_end_total_val if use_pf else static_pf_deduction
-        K_fast_display -= 0.794 * ef_bal_val if use_ef else static_ef_deduction
+        K_fast_display -= pf_start_total_val if use_pf else static_pf_deduction
+        K_fast_display -= 0.794 * ef_start_val if use_ef else static_ef_deduction
 
         plan.append({
             "year": t,
@@ -622,6 +679,12 @@ def solve_forest_lp(data: ForestPlanData, solver: Optional[pulp.LpSolver] = None
             "K_base": float(K_b10),
             "skogskonto_deposit_frac_eff": float(DEPOSIT_FRAC_EFF),
             "skogskonto_capital_share": float(gamma),
+            # FIX 14: Skogskonto interest
+            "skogskonto_interest": float(sk_interest * (pulp.value(Bavg[t]) or 0.0)) if sk_interest > 0 else 0.0,
+            # FIX 15: Negative rantefordelning warning
+            "neg_rf_warning": bool(float(pulp.value(CapBase[t]) or 0.0) < float(data.neg_rf_threshold)),
+            # FIX 19: Skogskonto min 5000 kr insattning warning
+            "skogskonto_deposit_warning": bool(0 < float(pulp.value(D[t]) or 0.0) < 5000),
         })
 
     obj_val = float(pulp.value(prob.objective) or 0.0)

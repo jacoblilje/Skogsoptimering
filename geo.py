@@ -45,6 +45,11 @@ OPEN_LAYERS: Dict[str, Tuple[str, int, str, List[str]]] = {
 _to_sweref = Transformer.from_crs(4326, 3006, always_xy=True)
 
 
+def _env(name: str) -> str:
+    """Miljövariabel utan citattecken och blanksteg som lätt följer med vid inklistring."""
+    return (os.environ.get(name) or "").strip().strip('"').strip("'").strip()
+
+
 class GeoError(Exception):
     """Fel som kan visas för användaren."""
 
@@ -190,7 +195,7 @@ def _lm_auth() -> Dict:
             _lm_token["value"] = body["access_token"]
             _lm_token["expires"] = time.time() + float(body.get("expires_in", 3000)) - 60
         return {"headers": {"Authorization": f"Bearer {_lm_token['value']}"}}
-    user, pwd = os.environ.get("LM_USERNAME"), os.environ.get("LM_PASSWORD")
+    user, pwd = _env("LM_USERNAME"), _env("LM_PASSWORD")
     if user and pwd:
         return {"auth": (user, pwd)}
     raise NotConfigured("Sökning på fastighetsbeteckning är inte aktiverad än.")
@@ -248,7 +253,7 @@ _sks_token: Dict = {"value": None, "expires": 0.0}
 
 
 def sks_configured() -> bool:
-    return bool(os.environ.get("SKS_CLIENT_ID") and os.environ.get("SKS_CLIENT_SECRET"))
+    return bool(_env("SKS_CLIENT_ID") and _env("SKS_CLIENT_SECRET"))
 
 
 def _sks_headers() -> Dict[str, str]:
@@ -258,13 +263,16 @@ def _sks_headers() -> Dict[str, str]:
         try:
             r = requests.post(SKS_TOKEN_URL, timeout=TIMEOUT, data={
                 "grant_type": "client_credentials", "scope": "sks_api",
-                "client_id": os.environ["SKS_CLIENT_ID"],
-                "client_secret": os.environ["SKS_CLIENT_SECRET"],
+                "client_id": _env("SKS_CLIENT_ID"),
+                "client_secret": _env("SKS_CLIENT_SECRET"),
             })
         except requests.RequestException as exc:
             raise GeoError("Skogsstyrelsens tjänst svarar inte just nu.") from exc
+        if r.status_code == 403:
+            # Skogsstyrelsens brandvägg släppte inte fram anropet (inte nycklarna).
+            raise GeoError("Skogsstyrelsens brandvägg blockerade serverns anrop (403).")
         if r.status_code != 200:
-            raise GeoError("Skogsstyrelsen godkände inte serverns nycklar.")
+            raise GeoError(f"Skogsstyrelsen godkände inte serverns nycklar ({r.status_code}).")
         body = r.json()
         _sks_token["value"] = body["access_token"]
         _sks_token["expires"] = time.time() + float(body.get("expires_in", 3600)) - 120

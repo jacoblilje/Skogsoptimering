@@ -1,7 +1,8 @@
-# main.py  –  v6.0
+# main.py  –  v9.0
 from forest_lp_realworld import (
-    ForestPlanData, CostPool, ProportionalCost, TaxSchedule, solve_forest_lp
+    ForestPlanData, CostPool, ProportionalCost, solve_forest_lp
 )
+from tax_curve import SwedishTaxInputs, build_tax_schedule, get_kommun_rates
 
 def main():
     N = 15
@@ -42,9 +43,6 @@ def main():
         expansionsfond_tax_rate=0.206,
         EF_initial_balance=400_000,
 
-        # FIX 3: EF cap = 125.94% × kapitalunderlag
-        ef_kapitalunderlag_for_cap=3_000_000,
-
         # Kostnader
         fixed_costs=[10_000]*N,
         flexible_cost_pools=[CostPool("Skogsvard", 60_000, 2, 6)],
@@ -63,19 +61,10 @@ def main():
 
         # FIX 2: rf_rate = SLR 2.55% + 6% = 8.55%
         rf_rate=0.0855,
-        use_Bavg=True,
 
-        # FIX 1: Realistisk skattekurva
-        # Kommunalskatt ~32.4% (Uppsala) + egenavgifter 28.97%*(1-0.075) = 26.80%
-        # Under skiktgräns: ~59.2%   Över skiktgräns: ~79.2%
+        # Marginalskatt för aktiv näringsverksamhet i Uppsala, inkomstår 2026
         tau_capital=0.30,
-        tax=TaxSchedule(
-            brackets=[
-                (643_100, 0.592),    # kommun + egenavg_eff (under skiktgräns)
-                (3_000_000, 0.792),  # + statlig 20% (över skiktgräns)
-            ],
-            base_tax=0.0,
-        ),
+        tax=build_tax_schedule(get_kommun_rates(), SwedishTaxInputs(kommun="Uppsala", income_year=2026)),
 
         # NPV
         discount_rate=0.03,

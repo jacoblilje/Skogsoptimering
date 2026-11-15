@@ -1,4 +1,4 @@
-# tax_curve.py  –  v8.0
+# tax_curve.py  –  v9.0
 # Realistisk marginalskattkurva för enskild näringsverksamhet (skog)
 # FIX 11: Korrekt egenavgiftscirkularitet (25% schablonavdrag)
 # FIX 13: Alla 290 kommuner (2025 total skattesats = kommun + region)
@@ -30,79 +30,76 @@ class TaxSchedule:
 
 @dataclass
 class SwedishTaxInputs:
-    """
-    Inputs for building a realistic Swedish income tax schedule
-    for enskild näringsverksamhet (active forestry).
-
-    Key parameters (2025 default values):
-      - skiktgrans: 643,100 kr – threshold for statlig skatt
-      - egenavgifter: 28.97% (full rate)
-      - nedsattning_egenavgifter: 7.5% reduction on egenavgifter
-      - statlig_skatt: 20%
-
-    FIX 11: 25% schablonavdrag innebär att kommun/statlig skatt
-    bara påförs 75% av inkomsten. Marginalskatt:
-      Under skiktgräns:  ea_eff + 0.75 × kommun            ≈ 51%
-      Över skiktgräns:   ea_eff + 0.75 × (kommun + statlig) ≈ 66%
-    """
+    """Indata för marginalskatten på överskott av enskild näringsverksamhet."""
     kommun: str
     aktiv_naringsverksamhet: bool = True
     include_state_tax: bool = True
-
-    # 2025 values (update yearly or use get_year_defaults)
-    skiktgrans: float = 643_100.0       # Skiktgräns for statlig skatt
-    egenavgifter_rate: float = 0.2897   # Full egenavgifter
-    schablonavdrag_rate: float = 0.075  # Nedsättning av egenavgifter (7.5%)
-    statlig_skatt: float = 0.20         # Statlig inkomstskatt
-
+    income_year: int = 2026
+    birth_year: Optional[int] = None    # styr egenavgiftssats och brytpunkt
     max_income: float = 3_000_000.0
-    extra_marginal: float = 0.0  # för känslighetsanalys / stress
+    extra_marginal: float = 0.0         # känslighetsanalys
 
 
 # ---------------------------------------------------------------------------
-#  FIX 18: Inkomstår-specifika standardvärden
+#  Belopp och procentsatser per inkomstår
 # ---------------------------------------------------------------------------
-
-# Räntefördelningsränta = SLR (statslåneränta nov föregående år) + 6%
-# Negativ räntefördelning = SLR + 1%
+# rf_rate      = statslåneräntan 30 nov året före + 6 procentenheter
+# neg_rf_rate  = statslåneräntan 30 nov året före + 1 procentenhet
+# brytpunkt    = skiktgräns + grundavdrag (inkomst före grundavdrag)
+# neg_rf_threshold: negativ räntefördelning görs bara om underlaget är lägre
+#   än tröskeln (-50 000 kr t.o.m. 2024, -500 000 kr fr.o.m. 2025).
 _YEAR_DEFAULTS: Dict[int, Dict] = {
-    2023: {
-        "skiktgrans": 540_700,
-        "rf_rate": 0.0824,       # SLR nov 2022 = 2.24% + 6%
-        "neg_rf_rate": 0.0324,   # SLR + 1%
-        "egenavgifter_rate": 0.2897,
-        "statlig_skatt": 0.20,
-    },
-    2024: {
-        "skiktgrans": 598_500,
-        "rf_rate": 0.0862,       # SLR nov 2023 = 2.62% + 6%
-        "neg_rf_rate": 0.0362,   # SLR + 1%
-        "egenavgifter_rate": 0.2897,
-        "statlig_skatt": 0.20,
-    },
-    2025: {
-        "skiktgrans": 643_100,
-        "rf_rate": 0.0855,       # SLR nov 2024 = 2.55% + 6%
-        "neg_rf_rate": 0.0355,   # SLR + 1%
-        "egenavgifter_rate": 0.2897,
-        "statlig_skatt": 0.20,
-    },
-    2026: {
-        "skiktgrans": 657_300,   # preliminärt
-        "rf_rate": 0.0810,       # SLR nov 2025 ≈ 2.10% + 6% (uppskattning)
-        "neg_rf_rate": 0.0310,   # SLR + 1%
-        "egenavgifter_rate": 0.2897,
-        "statlig_skatt": 0.20,
-    },
+    2023: {"skiktgrans": 598_500, "brytpunkt": 613_900, "brytpunkt_senior": 683_200,
+           "rf_rate": 0.0794, "neg_rf_rate": 0.0294, "neg_rf_threshold": -50_000, "preliminary": False},
+    2024: {"skiktgrans": 598_500, "brytpunkt": 615_300, "brytpunkt_senior": 708_800,
+           "rf_rate": 0.0862, "neg_rf_rate": 0.0362, "neg_rf_threshold": -50_000, "preliminary": False},
+    2025: {"skiktgrans": 625_800, "brytpunkt": 643_100, "brytpunkt_senior": 733_200,
+           "rf_rate": 0.0796, "neg_rf_rate": 0.0296, "neg_rf_threshold": -500_000, "preliminary": False},
+    2026: {"skiktgrans": 643_000, "brytpunkt": 660_400, "brytpunkt_senior": 760_500,
+           "rf_rate": 0.0855, "neg_rf_rate": 0.0355, "neg_rf_threshold": -500_000, "preliminary": False},
+    # 2027: skiktgränsen följer av prisbasbeloppet 59 600 kr. Statslåneräntan
+    # 30 nov 2026 är inte fastställd, så 2026 års räntor används tills vidare.
+    2027: {"skiktgrans": 660_300, "brytpunkt": 677_800, "brytpunkt_senior": 780_000,
+           "rf_rate": 0.0855, "neg_rf_rate": 0.0355, "neg_rf_threshold": -500_000, "preliminary": True},
 }
+
+EGENAVGIFT_FULL = 0.2897        # aktiv näringsverksamhet
+EGENAVGIFT_SENIOR = 0.1021      # endast ålderspensionsavgift
+SARSKILD_LONESKATT = 0.2426     # passiv näringsverksamhet
+STATLIG_SKATT = 0.20
+RIKSSNITT_KOMMUNALSKATT = 0.3241
 
 
 def get_year_defaults(year: int) -> Dict:
-    """
-    Returnerar skatteparametrar för ett givet inkomstår.
-    Faller tillbaka till 2025 om året inte finns.
-    """
-    return _YEAR_DEFAULTS.get(year, _YEAR_DEFAULTS[2025]).copy()
+    """Skatteparametrar för ett inkomstår. Okända år ger närmaste kända år."""
+    known = sorted(_YEAR_DEFAULTS)
+    use = min(known, key=lambda y: (abs(y - year), -y))
+    out = _YEAR_DEFAULTS[use].copy()
+    out["income_year"] = use
+    out["egenavgifter_rate"] = EGENAVGIFT_FULL
+    out["statlig_skatt"] = STATLIG_SKATT
+    if use != year:
+        out["preliminary"] = True
+    return out
+
+
+def avgiftssats(inp: SwedishTaxInputs) -> float:
+    """Egenavgifter / särskild löneskatt som andel av avgiftsunderlaget."""
+    if inp.birth_year is not None and inp.birth_year <= 1937:
+        return 0.0
+    if not inp.aktiv_naringsverksamhet:
+        return SARSKILD_LONESKATT
+    if is_senior(inp):
+        return EGENAVGIFT_SENIOR
+    return EGENAVGIFT_FULL
+
+
+def is_senior(inp: SwedishTaxInputs) -> bool:
+    """Har fyllt 67 vid inkomstårets ingång (66 t.o.m. 2025)."""
+    if inp.birth_year is None:
+        return False
+    limit = 67 if inp.income_year >= 2026 else 66
+    return inp.income_year - inp.birth_year > limit
 
 
 # ---------------------------------------------------------------------------
@@ -269,60 +266,52 @@ def get_kommun_rates(xlsx_path: Optional[str] = None) -> Dict[str, float]:
         return KOMMUN_RATES_2025.copy()
 
 
+def lookup_kommun_rate(kommun_rates: Dict[str, float], kommun: str) -> Tuple[float, bool]:
+    """Returnerar (skattesats, hittad). Okänd kommun ger rikssnittet."""
+    if kommun in kommun_rates:
+        return kommun_rates[kommun], True
+    wanted = (kommun or "").strip().lower()
+    for name, rate in kommun_rates.items():
+        if name.lower() == wanted:
+            return rate, True
+    return RIKSSNITT_KOMMUNALSKATT, False
+
+
 def build_tax_schedule(kommun_rates: Dict[str, float], inp: SwedishTaxInputs) -> TaxSchedule:
     """
-    Skapar en realistisk marginalskattkurva g(E) för enskild näringsverksamhet.
+    Marginalskatt på överskott av näringsverksamhet FÖRE avdrag för egenavgifter.
 
-    FIX 11: Korrekt hantering av egenavgiftscirkularitet.
+    Egenavgifterna (a) beräknas på överskottet efter avdrag för avgifterna
+    själva. På ett överskott Y blir avgiftsunderlaget och den beskattningsbara
+    inkomsten därför Y / (1 + a), och den sammanlagda marginalskatten
 
-    Egenavgifter (~29%) är avdragsgilla. Skatteverket hanterar detta via
-    ett schablonavdrag på 25% av inkomsten. Det innebär att kommun- och
-    statlig skatt bara påförs 75% av näringsinkomsten.
+        m = (a + s) / (1 + a)
 
-    Effektiv marginalskatt på 1 kr extra näringsinkomst:
-      1. Egenavgifter (netto efter 7.5% nedsättning): 28.97% × 0.925 = 26.80%
-      2. Kommunalskatt: kommun × 0.75  (pga 25% schablonavdrag)
-      3. Statlig skatt (över skiktgräns): 20% × 0.75 = 15%
+    där s är kommunalskatt, plus 20 % statlig skatt över brytpunkten.
+    Brytpunkten gäller inkomst efter egenavgifter och motsvarar därför ett
+    överskott på brytpunkt * (1 + a).
 
-    Under skiktgräns:  ~26.8% + 0.75 × ~32% ≈ 51%  (ej ~59% som v6)
-    Över skiktgräns:   ~26.8% + 0.75 × ~52% ≈ 66%  (ej ~79% som v6)
+    Schablonavdraget på 25 % är bara en preliminär avräkning som stäms av
+    året efter och påverkar inte den långsiktiga marginalskatten. Den
+    generella nedsättningen (7,5 %, högst 15 000 kr per år) är förbrukad vid
+    ca 200 000 kr och påverkar därför inte marginalen i de lägen planen
+    optimerar. Jobbskatteavdrag och grundavdragets avtrappning ingår inte.
     """
-    kommun = kommun_rates.get(inp.kommun, None)
-    if kommun is None:
-        # Försök case-insensitive match
-        for k, v in kommun_rates.items():
-            if k.lower() == inp.kommun.lower():
-                kommun = v
-                break
-        if kommun is None:
-            kommun = list(kommun_rates.values())[0] if kommun_rates else 0.32
+    kommun, _found = lookup_kommun_rate(kommun_rates, inp.kommun)
+    year = get_year_defaults(inp.income_year)
+    a = avgiftssats(inp)
+    state = STATLIG_SKATT if inp.include_state_tax else 0.0
 
-    # Effektiva egenavgifter (efter nedsättning 7.5%)
-    if inp.aktiv_naringsverksamhet:
-        egenavg_eff = inp.egenavgifter_rate * (1.0 - inp.schablonavdrag_rate)
-    else:
-        egenavg_eff = 0.0
-
-    # FIX 11: 25% schablonavdrag – kommun/statlig skatt på bara 75% av inkomsten
-    SCHABLON_FACTOR = 0.75
-
-    # Marginalskatt under skiktgräns
-    r_under = egenavg_eff + SCHABLON_FACTOR * kommun + inp.extra_marginal
-
-    # Marginalskatt över skiktgräns
-    state_add = inp.statlig_skatt if inp.include_state_tax else 0.0
-    r_over = egenavg_eff + SCHABLON_FACTOR * (kommun + state_add) + inp.extra_marginal
-
-    # Clamp to reasonable bounds
+    r_under = (a + kommun) / (1.0 + a) + inp.extra_marginal
+    r_over = (a + kommun + state) / (1.0 + a) + inp.extra_marginal
     r_under = min(max(r_under, 0.0), 0.90)
-    r_over = min(max(r_over, 0.0), 0.95)
+    r_over = min(max(r_over, r_under), 0.95)
 
-    # Threshold (skiktgräns)
-    threshold = max(0.0, inp.skiktgrans)
+    brytpunkt = year["brytpunkt_senior"] if is_senior(inp) else year["brytpunkt"]
+    threshold = float(brytpunkt) * (1.0 + a)
 
     brackets = [
         (threshold, r_under),
-        (inp.max_income, r_over),
+        (max(inp.max_income, threshold + 1.0), r_over),
     ]
-
     return TaxSchedule(brackets=brackets, base_tax=0.0, cap_income=inp.max_income)

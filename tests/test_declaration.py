@@ -199,3 +199,79 @@ def test_other_document_is_rejected():
         except DeclarationError:
             continue
         raise AssertionError("ogiltig fil accepterades")
+
+
+# ---------------------------------------------------------------- Skatteverkets blankett
+
+# Textlagret från Skatteverkets egen NE-blankett (SKV 2161), med påhittade
+# belopp. Uppställningen har tre fällor: rubriker på två rader, rutkoder som
+# nämns i andra rutors rubriker ("vid R33", "R29 (beloppet ...)") och
+# fotnotssiffror efter rubrikerna.
+SKV_PAGE_1 = """
+* Skatteverket      Inkomst av näringsverksamhetEnskilda näringsidkare      NE
+  Information om hur du fyller i blanketten finns på      Räkenskapsår
+  www.skatteverket.se.      2025-01-01      2025-12-31
+  Ange belopp i hela kronor.      Datum när blanketten fylls i
+      2026-08-24
+ Namn      Personnummer
+ Skogsägare, Anna      19650412-1234
+ Balansräkning/räkenskapsschema
+ Anläggningstillgångar      Eget kapital
+ B1      Immateriella anläggningstillgångar      B10      Eget kapital (tillgångar - skulder)      1 950 400
+ B2      Byggnader och markanläggningar      Obeskattade reserver 2
+      Mark och andra tillgångar som inte får
+ B3      skrivas av      310 000      B11      Obeskattade reserver
+ B4      Maskiner och inventarier      Avsättningar 2
+ B9      Kassa och bank      1 660 150      B16      Övriga skulder
+ R4      Ränteintäkter m.m.      +      4 200      Bokfört resultat
+      R11      (förs över till sidan 2 R12)      (+/-)      =      88 000
+""".strip("\n").split("\n")
+
+SKV_PAGE_2 = """
+Skattemässiga justeringar av bokfört resultat
+      Bokfört resultat      Positiv räntefördelning, dock högst överskott vid
+R12      (förs över från R11 sidan 1)      (+/-)      =      88 000      R30      R29 (beloppet förs även till p. 11.1 på INK1)      -      140 500
+R14      Bokförda intäkter som inte ska tas upp      -      R32      Återföring av periodiseringsfond      +
+      Kostnader som inte bokförts men som ska      Avsättning till periodiseringsfond, dock högst
+R16      dras av      -      R34      30 % av överskott vid R33      -
+      Gemensam verksamhet - överskott redovisad      Ökning av expansionsfond, dock högst överskott
+R18      av annan 3a  eller min andel av underskott 3b      -      R36      vid R35 (beloppet förs även till p. 12.1 på INK1)      -
+      Outnyttjat underskott från föregående beskatt-      Årets beräknade avdrag för egenavgifter och
+R24      ningsår (R48 i föregående års blankett)      -      R43      särskild löneskatt      -
+      Uttag från skogs-, skogsskade- eller upphovs-      avyttring av näringsfastighet/näringsbostadsrätt
+R27      mannakonto      +      52 500      R46      och underskott i andelshus      +
+      Inbetalning till skogs-, skogsskade- eller      Överskott (+). Överförs till INK1 sidan 2, p. 10.1
+R28      upphovsmannakonto      -      R47      eller 10.3      =      0
+      Överskott (+)/Underskott (-) före ränteför-      Underskott (-). Överförs till INK1 sidan 2, p. 10.2
+R29      delning      =      R48      eller 10.4. Nästa år förs beloppet till R24.      =
+Övriga uppgifter
+2. Har du dragit av bilkostnader för egen bil enligt      8. Kapitalunderlag för räntefördelning (positivt) 4      2 100 000
+      schablon (25 kr/mil), ange beloppet
+3. Ränteutgifter enligt kontrolluppgifter för beskattningsåret      9. Kapitalunderlag för räntefördelning (negativt) 4
+      som dragits av i näringsverksamhet, ange belopp      10. Positivt fördelningsbelopp som sparas till nästa
+4. Vid restvärdesavskrivning: återförda belopp för      beskattningsår 4      905 300
+      av- och nedskrivning, försäljning och utrangering
+      11. Kapitalunderlag expansionsfond (positivt) 5
+5. Årets begärda och tidigare års medgivna värde-
+""".strip("\n").split("\n")
+
+
+def test_official_skatteverket_form_layout():
+    from declaration_parser import analyse_pages
+    result = analyse_pages([SKV_PAGE_1, SKV_PAGE_2])
+    s = by_key(result)
+    assert result["form"] == "NE"
+    assert result["declared_income_year"] == 2025 and s["income_year"]["value"] == 2026
+    assert s["b10_assets_minus_liabilities"]["value"] == 1_950_400
+    assert s["saved_allocation_amount"]["value"] == 905_300            # rubrik på två rader
+    # "30 % av överskott vid R33" är text, inte en avsättning på 30 kr
+    assert "pf_entries" not in s
+    assert "skogskonto_entries" not in s and "initial_underskott" not in s
+    assert set(s) == {"income_year", "b10_assets_minus_liabilities", "saved_allocation_amount"}
+    assert all(x["confidence"] == "high" for x in s.values())
+    info = {i["source"]: i["value"] for i in result["info"]}
+    assert info["NE ruta R30"] == 140_500                              # inte tilldelat R29
+    assert "NE ruta R29" not in info
+    # Fotnoten "5" efter rubriken betyder inte att det finns en expansionsfond
+    assert not any("expansionsfond" in w.lower() for w in result["warnings"])
+    assert any("skogskontot" in w for w in result["warnings"])         # uttag R27

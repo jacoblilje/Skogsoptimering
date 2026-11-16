@@ -50,7 +50,8 @@ LABEL_FIELDS: Dict[str, Tuple[str, str]] = {
                   r"kapitalunderlag\s+(?:för\s+)?räntefördelning\s*\(?\s*positivt"),
     "ku_rf_neg": ("Kapitalunderlag räntefördelning (negativt)",
                   r"kapitalunderlag\s+(?:för\s+)?räntefördelning\s*\(?\s*negativt"),
-    "sparat_fb": ("Sparat fördelningsbelopp", r"sparat\s+fördelningsbelopp"),
+    "sparat_fb": ("Sparat fördelningsbelopp",
+                  r"sparat\s+fördelningsbelopp|fördelningsbelopp\s+som\s+sparas(?:\s+till\s+nästa)?(?:\s+beskattningsår)?"),
     "ku_ef": ("Kapitalunderlag expansionsfond", r"kapitalunderlag\s+(?:för\s+)?expansionsfond"),
     # N8 Skogsuppgifter (rubrikerna varierar mellan program - läses med låg säkerhet)
     "sa_anskaffning": ("Anskaffningsvärde skog", r"anskaffningsvärde(?:t)?\s+(?:för\s+)?(?:skog|skogen)"),
@@ -66,13 +67,13 @@ _AMOUNT_RE = re.compile(
     r"(?P<sign>[-−–]\s?)?"
     r"(?P<num>\d{1,3}(?:[   .]\d{3})+|\d+)"
     r"(?P<dec>,\d{1,2})?"
-    r"(?![\w%]|[.,/:-]\d)"
+    r"(?![\w%]|\s?%|[.,/:-]\d)"
 )
 _REFERENCE_BEFORE = re.compile(r"(?:\bav|\bruta|\brutan|\bi|\bfrån|\benligt|\bse|\btill|\bsumma|[–\-+=,])\s*$", re.I)
 _YEAR_RES = [
     re.compile(r"inkomstår(?:et)?\s*:?\s*(20\d\d)", re.I),
     re.compile(r"beskattningsår(?:et)?\s*:?\s*(20\d\d)", re.I),
-    re.compile(r"(20\d\d)-01-01\s*[-–—]\s*20\d\d-12-31"),
+    re.compile(r"(20\d\d)-01-01\s*[-–—]?\s*20\d\d-12-31"),
     re.compile(r"(20\d\d)0101\s*[-–—]\s*20\d\d1231"),
 ]
 
@@ -100,6 +101,9 @@ def _amounts(text: str) -> List[Tuple[int, float]]:
     masked = re.sub(r"\bSKV\s?\d+\b", lambda m: " " * len(m.group()), masked, flags=re.I)  # blankettnummer
     masked = re.sub(r"\bN\d{1,2}[A-Z]?\b", lambda m: " " * len(m.group()), masked)         # bilaga N8 m.fl.
     masked = _CODE_RE.sub(lambda m: " " * len(m.group()), masked)
+    # "10. Positivt ..." (numrerad rubrik) och "(positivt) 4" (fotnot) är inga belopp.
+    masked = re.sub(r"(?<![\d.,])\d{1,2}\.(?=\s+[A-ZÅÄÖ])", lambda m: " " * len(m.group()), masked)
+    masked = re.sub(r"(?<=[A-Za-zÅÄÖåäö)])\s\d(?=\s|$)", "  ", masked)
     out = []
     for m in _AMOUNT_RE.finditer(masked):
         digits = re.sub(r"[ .]", "", m.group("num"))
@@ -128,34 +132,55 @@ def _extract_pages(reader: PdfReader) -> List[List[str]]:
     return pages
 
 
+def _is_field_code(line: str, m: "re.Match") -> bool:
+    """Är koden en ruta på blanketten, eller bara omnämnd i en rubrik?
+
+    På blanketten står rutkoden först i sin cell. Omnämnanden står mitt i
+    löptext ("högst 30 % av överskott vid R33") eller direkt efter rutans
+    egen kod ("R30   R29 (beloppet förs även ...)").
+    """
+    before = line[:m.start()]
+    stripped = before.rstrip()
+    if not stripped:
+        return True
+    if stripped.endswith("("):
+        return False
+    if len(before) - len(stripped) < 2:      # bara ett mellanslag före: löptext
+        return False
+    prev = list(_CODE_RE.finditer(stripped))
+    if prev and prev[-1].end() == len(stripped):   # föregås direkt av en annan kod
+        return False
+    return True
+
+
 def _find_codes(pages: List[List[str]]) -> Dict[str, _Hit]:
     best: Dict[str, _Hit] = {}
     for page_no, lines in enumerate(pages, start=1):
         for idx, line in enumerate(lines):
-            matches = list(_CODE_RE.finditer(line))
-            if not matches:
+            fields = [m for m in _CODE_RE.finditer(line) if _is_field_code(line, m)]
+            if not fields:
                 continue
-            for i, m in enumerate(matches):
+            prev_line = lines[idx - 1].lower() if idx > 0 else ""
+            for i, m in enumerate(fields):
                 code = f"{m.group(1)}{int(m.group(2))}"
                 if code not in NE_FIELDS:
                     continue
-                seg_end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
+                seg_end = fields[i + 1].start() if i + 1 < len(fields) else len(line)
                 segment = line[m.end():seg_end]
-                before = line[:m.start()]
 
-                score = 0
-                if not before.strip():
-                    score += 2
-                if any(k in segment.lower() for k in NE_FIELDS[code][1]):
+                # Rubriken står ofta på två rader, med början på raden ovanför.
+                score = 2
+                keywords = NE_FIELDS[code][1]
+                if any(k in segment.lower() for k in keywords):
                     score += 3
-                if _REFERENCE_BEFORE.search(before):
-                    score -= 4
+                elif any(k in prev_line for k in keywords):
+                    score += 2
 
                 amounts = _amounts(segment)
                 value: Optional[float] = None
                 if amounts:
                     value = amounts[-1][1]
-                elif i + 1 == len(matches) and idx + 1 < len(lines):
+                elif i + 1 == len(fields) and idx + 1 < len(lines):
                     # Beloppet står ensamt på nästa rad.
                     nxt = lines[idx + 1].strip()
                     nxt_amounts = _amounts(nxt)
@@ -182,11 +207,23 @@ def _find_labels(pages: List[List[str]]) -> Dict[str, _Hit]:
                     continue
                 amounts = _amounts(line[m.end():])
                 if amounts:
-                    found[key] = _Hit(amounts[-1][1], page_no, 2)
-                elif idx + 1 < len(lines):
-                    nxt = _amounts(lines[idx + 1])
-                    if len(nxt) == 1 and not re.search(r"[A-Za-zÅÄÖåäö]{3,}", lines[idx + 1]):
-                        found[key] = _Hit(nxt[0][1], page_no, 1)
+                    found[key] = _Hit(amounts[-1][1], page_no, 3)
+                    continue
+                if idx + 1 >= len(lines):
+                    continue
+                nxt = lines[idx + 1]
+                if key == "sparat_fb":
+                    # Blankettens rubrik fortsätter på nästa rad:
+                    # "... som sparas till nästa" / "beskattningsår 4      1 208 285"
+                    cont = re.search(r"beskattningsår", nxt.lower())
+                    if cont and not low[m.end():].strip():
+                        rest = _amounts(nxt[cont.end():])
+                        if rest:
+                            found[key] = _Hit(rest[-1][1], page_no, 3)
+                    continue
+                one = _amounts(nxt)
+                if len(one) == 1 and not re.search(r"[A-Za-zÅÄÖåäö]{3,}", nxt):
+                    found[key] = _Hit(one[0][1], page_no, 1)
     return found
 
 
@@ -219,6 +256,10 @@ def _find_income_year(pages: List[List[str]]) -> Optional[int]:
         m = rx.search(text)
         if m:
             return int(m.group(1))
+    # Räkenskapsår angivet som två datum i var sin ruta: slutdatumets år gäller.
+    m = re.search(r"räkenskapsår[\s\S]{0,200}?20\d\d-\d\d-\d\d\s+(20\d\d)-\d\d-\d\d", text, re.I)
+    if m:
+        return int(m.group(1))
     # "Inkomstdeklaration 1 2026" avser inkomståret före.
     m = re.search(r"inkomstdeklaration\s+1\D{0,20}(20\d\d)", text, re.I)
     if m:
@@ -246,6 +287,13 @@ def parse_declaration_pdf(pdf_bytes: bytes) -> Dict:
 
     pages = _extract_pages(reader)
     form_hits = _find_form_fields(reader)
+    return analyse_pages(pages, form_hits)
+
+
+def analyse_pages(pages: List[List[str]], form_hits: Optional[Dict[str, _Hit]] = None) -> Dict:
+    """Tolkar deklarationens text (en lista rader per sida)."""
+    form_hits = form_hits or {}
+    n_pages = len(pages)
     text_chars = sum(len(ln) for p in pages for ln in p)
     if text_chars < 200 and not form_hits:
         raise DeclarationError(
@@ -350,7 +398,7 @@ def parse_declaration_pdf(pdf_bytes: bytes) -> Dict:
 
     # --- Expansionsfond ---
     r36, r37 = code_val("R36") or 0, code_val("R37") or 0
-    if r36 > 0 or r37 > 0 or "ku_ef" in labels:
+    if r36 > 0 or r37 > 0 or labels.get("ku_ef", _Hit(0, 0, 0)).value > 0:
         warnings.append(
             "Du har expansionsfond. Fondens totala saldo framgår inte av NE-bilagan - fyll i det "
             f"själv (förra årets ökning: {_kr(r36)}, minskning: {_kr(r37)})."
